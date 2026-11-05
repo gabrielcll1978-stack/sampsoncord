@@ -202,7 +202,7 @@ function setMemberVolume(m, kind, vol) {
 let pendingFocus = null; // tela que o usuário pediu pra assistir e ainda está chegando
 
 function tileLabel(id) {
-  if (id === 'me') return `Sua tela · ${shareInfo || ''}`;
+  if (id === 'me') return `Sua tela · ${shareInfo || ''}${shareEncoderInfo ? ' · ' + shareEncoderInfo : ''}`;
   const s = voiceSession();
   const m = s && s.members.get(id);
   return m ? `${m.name}${m.sharing ? ' · ' + m.sharing : ''}` : 'Tela';
@@ -333,14 +333,74 @@ function bitrateFor(w, h, fps) {
 }
 const fmtMbps = (bps) => (bps / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' Mbps';
 
+// Codificador da tela. Por padrão o WebRTC comprime em VP8 pelo PROCESSADOR (pesado, uma vez
+// por pessoa assistindo). Preferindo H.264, quase toda placa de vídeo (NVIDIA/AMD/Intel) comprime
+// no chip dedicado: bem menos CPU e mesma qualidade. Se o outro lado não aceitar, cai pro VP8 sozinho.
+let shareEncoderPref = 'gpu'; // 'gpu' (H.264 primeiro) | 'cpu' (VP8 primeiro)
+let shareEncoderInfo = '';    // o que está sendo usado de fato (mostrado na sua tela)
+function preferCodec(pc) {
+  try {
+    if (!RTCRtpSender.getCapabilities) return;
+    const caps = RTCRtpSender.getCapabilities('video').codecs;
+    const first = shareEncoderPref === 'cpu' ? 'video/VP8' : 'video/H264';
+    const ordered = [...caps.filter((c) => c.mimeType === first), ...caps.filter((c) => c.mimeType !== first)];
+    for (const tr of pc.getTransceivers()) {
+      if (tr.sender && tr.sender.track && tr.sender.track.kind === 'video' && tr.setCodecPreferences) tr.setCodecPreferences(ordered);
+    }
+  } catch (e) { console.warn('codec', e); }
+}
+// O PeerJS cria a proposta (SDP) no mesmo instante da chamada, então a preferência vai direto nela:
+// reordena os formatos da linha de vídeo colocando o preferido (e o "rtx" dele) primeiro.
+function sdpPreferCodec(sdp) {
+  const want = shareEncoderPref === 'cpu' ? 'VP8' : 'H264';
+  const lines = sdp.split('\r\n');
+  const mi = lines.findIndex((l) => l.startsWith('m=video'));
+  if (mi < 0) return sdp;
+  const parts = lines[mi].split(' ');
+  const pts = parts.slice(3);
+  const codecOf = {}, fmtp = {}, rtxFor = {};
+  for (const l of lines) {
+    let m = l.match(/^a=rtpmap:(\d+) ([^/]+)\//); if (m) codecOf[m[1]] = m[2];
+    m = l.match(/^a=fmtp:(\d+) (.*)$/); if (m) { fmtp[m[1]] = m[2]; const apt = m[2].match(/apt=(\d+)/); if (apt) rtxFor[apt[1]] = m[1]; }
+  }
+  let preferred = pts.filter((p) => (codecOf[p] || '').toUpperCase() === want);
+  if (!preferred.length) return sdp;
+  // H.264 "packetization-mode=1" é o que os codificadores de placa de vídeo usam melhor
+  preferred.sort((a, b) => (/packetization-mode=1/.test(fmtp[b] || '') ? 1 : 0) - (/packetization-mode=1/.test(fmtp[a] || '') ? 1 : 0));
+  const first = [];
+  for (const p of preferred) { first.push(p); if (rtxFor[p]) first.push(rtxFor[p]); }
+  lines[mi] = [...parts.slice(0, 3), ...first, ...pts.filter((p) => !first.includes(p))].join(' ');
+  return lines.join('\r\n');
+}
+
+// Lê nas estatísticas qual codificador ficou ativo (placa de vídeo ou processador)
+async function readEncoder(pc) {
+  try {
+    const st = await pc.getStats();
+    let out = null, codecs = {};
+    st.forEach((r) => { if (r.type === 'codec') codecs[r.id] = r.mimeType; });
+    st.forEach((r) => {
+      if (r.type === 'outbound-rtp' && r.kind === 'video') {
+        const codec = (codecs[r.codecId] || '').replace('video/', '');
+        const known = r.powerEfficientEncoder !== undefined || !!r.encoderImplementation; // o navegador às vezes esconde
+        const gpu = r.powerEfficientEncoder === true || /Accelerator|NVENC|AMF|QuickSync|MediaFoundation/i.test(r.encoderImplementation || '');
+        out = known ? `${gpu ? '⚡ placa de vídeo' : 'processador'}${codec ? ' (' + codec + ')' : ''}` : codec;
+      }
+    });
+    if (out && out !== shareEncoderInfo) { shareEncoderInfo = out; const t = $('.tile[data-id="me"] .lbl'); if (t) t.textContent = tileLabel('me'); }
+  } catch { }
+}
+
 function sendScreenTo(s, m) {
-  const call = s.me.call(m.id, screenStream, { metadata: { kind: 'screen', cid: voice.cid } });
+  const call = s.me.call(m.id, screenStream, { metadata: { kind: 'screen', cid: voice.cid }, sdpTransform: sdpPreferCodec });
   m.screenOut = call;
   call.on('close', () => { if (m.screenOut === call) m.screenOut = null; });
   const pc = call.peerConnection;
   if (!pc) return;
+  preferCodec(pc); // reforço para renegociações (a proposta inicial já vai ajustada pelo sdpTransform)
   const tune = () => {
     if (pc.connectionState !== 'connected') return;
+    setTimeout(() => readEncoder(pc), 4000);
     const vt = screenStream && screenStream.getVideoTracks()[0];
     if (!vt) return;
     const st = vt.getSettings();
@@ -360,7 +420,7 @@ function sendScreenTo(s, m) {
 
 async function openSharePicker() {
   if (!voice.code) return toast('Entre num canal de voz para compartilhar a tela.');
-  const prefs = Object.assign({ res: '1080', fps: 30, audio: false, bitrate: 'auto' }, store.get('salinha-share', {}));
+  const prefs = Object.assign({ res: '1080', fps: 30, audio: false, bitrate: 'auto', encoder: 'gpu' }, store.get('salinha-share', {}));
   openModal(`
     <h2>Compartilhar tela</h2>
     <div class="picker-grid"><div class="muted">Carregando telas…</div></div>
@@ -374,9 +434,13 @@ async function openSharePicker() {
       <label class="field">Bitrate (qualidade)
         <select id="opt-bitrate">${BITRATES.map(([k, l]) => `<option value="${k}" ${k === prefs.bitrate ? 'selected' : ''}>${l}</option>`).join('')}</select>
       </label>
+      <label class="field">Codificador
+        <select id="opt-encoder"><option value="gpu" ${prefs.encoder !== 'cpu' ? 'selected' : ''}>⚡ Placa de vídeo (H.264) — recomendado</option><option value="cpu" ${prefs.encoder === 'cpu' ? 'selected' : ''}>Processador (VP8) — se der problema</option></select>
+      </label>
       <label class="check"><input type="checkbox" id="opt-audio" ${prefs.audio ? 'checked' : ''}/> Som do PC</label>
     </div>
-    <p class="muted small">Bitrate é quanta internet a transmissão pode usar: mais alto = imagem mais nítida, mas precisa de mais upload
+    <p class="muted small">Codificador "Placa de vídeo" usa o chip de vídeo da sua placa (NVIDIA/AMD/Intel) e quase não pesa no processador. Se a imagem ficar estranha, troque para "Processador".<br>
+      Bitrate é quanta internet a transmissão pode usar: mais alto = imagem mais nítida, mas precisa de mais upload
       (multiplique pelo número de amigos assistindo). "Automático" escolhe pela resolução e FPS, até 10 Mbps.<br>
       Dica: 60–120 FPS é melhor para jogos; 15–30 FPS com resolução alta é melhor para texto e código.
       120 FPS só chega a 120 se o seu monitor for de 120 Hz ou mais e o PC e a internet aguentarem; se não, o vídeo usa o máximo que conseguir. Qualidade alta exige mais internet de quem compartilha (cada amigo recebe uma cópia). "Som do PC" manda todo o áudio do computador, inclusive a voz dos amigos de volta.</p>
@@ -390,7 +454,9 @@ async function openSharePicker() {
       const fps = +card.querySelector('#opt-fps').value;
       const audio = card.querySelector('#opt-audio').checked;
       const bitrate = card.querySelector('#opt-bitrate').value;
-      store.set('salinha-share', { res, fps, audio, bitrate });
+      const encoder = card.querySelector('#opt-encoder').value;
+      shareEncoderPref = encoder;
+      store.set('salinha-share', { res, fps, audio, bitrate, encoder });
       closeModal();
       startShare(chosen, res, fps, audio, bitrate);
     };
@@ -459,6 +525,7 @@ function stopShare(quiet) {
   screenStream.getTracks().forEach((t) => t.stop());
   screenStream = null;
   shareInfo = null;
+  shareEncoderInfo = '';
   const s = voiceSession();
   if (s) {
     for (const m of s.members.values()) {

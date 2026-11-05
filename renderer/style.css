@@ -506,3 +506,4 @@ kbd { background: var(--bg-rail); border: 1px solid var(--bg4); border-bottom-wi
 .round.yt-round.pending { background: #ff0033; color: #fff; animation: pulse 1.4s infinite ease-in-out; }
 .yt-badge { background: #ff0033; color: #fff; font-size: 9px; font-weight: 700; width: 20px; height: 14px; border-radius: 4px;
   display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.share-opts { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
