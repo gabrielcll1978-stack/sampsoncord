@@ -89,19 +89,7 @@ const store = {
 };
 
 // ---------------------------------------------------------------- configurações deste PC
-const DEFAULT_SETTINGS = { micId: '', outId: '', notify: true, sounds: true, announce: true, theme: 'dark', showActivity: true };
-
-// Atividade ("Jogando X" / "Ouvindo Spotify"): { k: 'game'|'app', n: nome, v: verbo }
-function cleanActivity(a) {
-  if (!a || typeof a !== 'object' || !['game', 'app'].includes(a.k) || typeof a.n !== 'string') return null;
-  const n = cleanName(a.n, 50);
-  if (!n) return null;
-  return { k: a.k, n, v: a.v === 'Ouvindo' ? 'Ouvindo' : 'Usando' };
-}
-function activityText(a) {
-  if (!a) return '';
-  return a.k === 'game' ? `🎮 Jogando ${a.n}` : `${a.v === 'Ouvindo' ? '🎵' : '💻'} ${a.v} ${a.n}`;
-}
+const DEFAULT_SETTINGS = { micId: '', outId: '', notify: true, sounds: true, announce: true, theme: 'dark' };
 const settings = Object.assign({}, DEFAULT_SETTINGS, store.get('salinha-settings', {}));
 const saveSettings = () => store.set('salinha-settings', settings);
 
