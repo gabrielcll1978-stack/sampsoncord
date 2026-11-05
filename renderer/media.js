@@ -2,6 +2,7 @@
 // ---------------------------------------------------------------- voz e tela
 // Só dá pra estar em um canal de voz por vez (em qualquer servidor).
 const voice = { code: null, cid: null };
+let voiceJoinedAt = 0; // quando entrei no canal de voz atual
 let localStream = null, screenStream = null, shareInfo = null;
 let muted = false, deaf = false, mutedBeforeDeaf = false;
 let stopLocalMeter = null;
@@ -74,6 +75,7 @@ async function joinVoice(s, cid) {
   localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
   voice.code = s.code;
   voice.cid = cid;
+  voiceJoinedAt = Date.now();
   stopLocalMeter = watchSpeaking(localStream, (sp) => setSpeaking('me', sp && !muted)); // mutado nunca fica verde
   soundJoin();
   s.sendState();
@@ -106,7 +108,7 @@ function reconcile(s) {
       if (!m.voice && s.me.id < m.id && localStream) {
         bindVoice(s, m, s.me.call(m.id, localStream, { metadata: { kind: 'voice', cid: voice.cid } }));
       }
-      if (screenStream && !m.screenOut && !m.noWatch) sendScreenTo(s, m);
+      if (screenStream && !m.screenOut && wantsMyScreen(m)) sendScreenTo(s, m);
     } else {
       dropMedia(m);
     }
@@ -154,12 +156,25 @@ function onCall(s, call) {
   const m = s.members.get(call.peer);
   if (!m || voice.code !== s.code || meta.cid !== voice.cid) { call.close(); return; }
   if (meta.kind === 'screen') {
-    if (m.unwatched) { call.close(); return; } // parei de assistir essa pessoa
+    if (!m.watching) { call.close(); return; } // só recebo a tela de quem eu cliquei pra assistir
     if (m.screenIn) { const old = m.screenIn; m.screenIn = null; old.close(); }
     m.screenIn = call;
+    m.screenAskedAt = 0;
     call.answer();
-    call.on('stream', (stream) => { if (m.screenIn === call) addTile(m.id, stream, false); });
-    call.on('close', () => { if (m.screenIn === call) { m.screenIn = null; removeTile(m.id); } });
+    // 'stream' dispara uma vez por trilha (vídeo e, se tiver, som): addTile ignora a repetição
+    call.on('stream', (stream) => { if (m.screenIn === call) addTile(m.id, stream); });
+    call.on('close', () => {
+      if (m.screenIn !== call) return;
+      m.screenIn = null;
+      removeTile(m.id);
+      // caiu, mas a pessoa continua compartilhando e eu quero ver: pede a tela de novo na hora
+      setTimeout(() => {
+        if (m.sharing && m.watching && !m.screenIn && inMyChannel(s, m) && m.conn && m.conn.open) {
+          m.screenAskedAt = Date.now();
+          askScreen(m);
+        }
+      }, 800);
+    });
     return;
   }
   if (m.voice) { const old = m.voice; m.voice = null; old.close(); }
@@ -198,80 +213,142 @@ function setMemberVolume(m, kind, vol) {
   $$(`.tile[data-id="${m.id}"] [data-tile="mute"]`).forEach((b) => (b.innerHTML = kind === 'screen' && vol === 0 ? ICON.volOff : ICON.speaker));
 }
 
+// Quantas pessoas estão recebendo minha tela agora (pra barra "Você está ao vivo")
+function shareViewers() {
+  const s = voiceSession();
+  if (!s || !screenStream) return 0;
+  return [...s.members.values()].filter((m) => m.screenOut && m.screenOut.peerConnection && m.screenOut.peerConnection.connectionState === 'connected').length;
+}
+
+// Quem compartilha: alguém avisou que não está recebendo minha tela -> refaz só a conexão dessa pessoa
+function resendScreenTo(s, m) {
+  if (!screenStream || voiceSession() !== s || !inMyChannel(s, m)) return;
+  m.noWatch = false;
+  m.wantsScreen = true;
+  if (m.screenOut) { const c = m.screenOut; m.screenOut = null; try { c.close(); } catch { } }
+  sendScreenTo(s, m);
+}
+
+// Quem assiste: a cada 4s confere se está recebendo a tela de todo mundo que está compartilhando.
+// Se não estiver (conexão caiu, travou antes do primeiro quadro), pede de novo pra pessoa.
+setInterval(() => {
+  const s = voiceSession();
+  if (!s) return;
+  if (screenStream) ui.refresh(); // atualiza "N assistindo" na barra de quem compartilha
+  const now = Date.now();
+  for (const m of s.members.values()) {
+    if (!m.sharing || !m.watching || !inMyChannel(s, m) || !m.conn || !m.conn.open) continue;
+    const tile = $(`.tile[data-id="${m.id}"]`);
+    const v = tile && tile.querySelector('video');
+    const stuck = !m.screenIn
+      ? now - Math.max(m.sharingSince || 0, voiceJoinedAt) > 6000              // 6s (desde que ela começou ou eu entrei) e nada chegou
+      : v && v.videoWidth === 0 && now - (+tile.dataset.since || now) > 8000; // chegou, mas sem nenhum quadro
+    if (stuck && now - (m.screenAskedAt || 0) > 10000) {
+      m.screenAskedAt = now;
+      askScreen(m);
+    }
+    // vídeo pausado sozinho (navegador)? dá play de novo
+    if (v && v.paused && v.srcObject) v.play().catch(() => { });
+  }
+}, 4000);
+
 // ---------------------------------------------------------------- telas no palco
 let pendingFocus = null; // tela que o usuário pediu pra assistir e ainda está chegando
 
 function tileLabel(id) {
-  if (id === 'me') return `Sua tela · ${shareInfo || ''}${shareEncoderInfo ? ' · ' + shareEncoderInfo : ''}`;
+  if (id === 'yt') return 'Assistindo juntos';
   const s = voiceSession();
   const m = s && s.members.get(id);
   return m ? `${m.name}${m.sharing ? ' · ' + m.sharing : ''}` : 'Tela';
+}
+
+// ------------------------------------------------------------ layout do palco
+// Grade: todas as telas do mesmo tamanho, ocupando o espaço (1, 2, 2x2, 3x2...).
+// Foco: a tela escolhida grande e as outras em miniaturas embaixo, CONTINUANDO a rodar.
+function layoutTiles() {
+  const box = $('#tiles');
+  const tiles = $$('.tile', box);
+  const n = tiles.length;
+  let focused = $('.tile.focused', box);
+  if (focused && n < 2) { focused.classList.remove('focused'); focused = null; } // com 1 tela só, ela já é grande
+  box.classList.toggle('has-focus', !!focused);
+  box.classList.toggle('many', n > 1);
+  const cols = n <= 1 ? 1 : n <= 4 ? 2 : 3;
+  box.style.setProperty('--cols', cols);
+  box.style.setProperty('--rows', Math.max(1, Math.ceil(n / cols)));
+  for (const t of tiles) {
+    const f = t.classList.contains('focused');
+    const b = t.querySelector('[data-tile="focus"]');
+    if (b) { b.innerHTML = f ? ICON.shrink : ICON.expand; b.title = f ? 'Voltar para a grade (ver todas iguais)' : 'Ampliar esta tela'; b.classList.toggle('hidden', n < 2); }
+    t.title = n > 1 ? (f ? 'Clique para voltar à grade · duplo clique = tela cheia' : 'Clique para ampliar · duplo clique = tela cheia') : 'Duplo clique = tela cheia';
+  }
+  ui.refresh();
 }
 function focusTile(id) {
   const tile = $(`.tile[data-id="${id}"]`);
   if (!tile) return;
   $$('.tile.focused').forEach((t) => t.classList.remove('focused'));
   tile.classList.add('focused');
-  $('#tiles').classList.add('has-focus');
-  updateTileButtons();
+  layoutTiles();
 }
 function unfocusTiles() {
   $$('.tile.focused').forEach((t) => t.classList.remove('focused'));
-  $('#tiles').classList.remove('has-focus');
-  updateTileButtons();
+  layoutTiles();
 }
-function updateTileButtons() {
-  ui.refresh();
-  $$('.tile').forEach((t) => {
-    const b = t.querySelector('[data-tile="focus"]');
-    const f = t.classList.contains('focused');
-    b.innerHTML = f ? ICON.shrink : ICON.expand;
-    b.title = f ? 'Voltar para todas as telas' : 'Ampliar esta tela';
-  });
-}
+const updateTileButtons = layoutTiles; // nome antigo (usado pelo vídeo do YouTube)
+
 // Parar de assistir: fecha o vídeo (economiza internet dos dois lados) e avisa quem compartilha
 function stopWatching(id) {
   const s = voiceSession(), m = s && s.members.get(id);
   if (!m) return;
-  m.unwatched = true;
+  m.watching = false;
   if (m.screenIn) { const c = m.screenIn; m.screenIn = null; c.close(); }
   removeTile(id);
   try { m.conn && m.conn.open && m.conn.send({ t: 'unwatch' }); } catch { }
-  toast(`Você parou de assistir a tela de ${m.name}`);
+  toast(`Você parou de assistir a tela de ${m.name}. Pra voltar, clique no ▶ AO VIVO.`);
 }
-// Voltar a assistir alguém que eu tinha parado
+// Começar a assistir a tela de alguém (só chega quando eu clico em "Assistir")
 function resumeWatching(s, m) {
-  if (!m.unwatched) return;
-  m.unwatched = false;
+  if (m.watching) { if (!m.screenIn) askScreen(m); return; }
+  m.watching = true;
+  m.screenAskedAt = Date.now();
   try { m.conn && m.conn.open && m.conn.send({ t: 'watch' }); } catch { }
 }
+// Pede (de novo) a tela: versões novas entendem "screen-req"; as antigas só "watch"
+function askScreen(m) {
+  try { m.conn && m.conn.open && m.conn.send({ t: (m.proto || 2) >= 4 ? 'screen-req' : 'watch' }); } catch { }
+}
+// Quem compartilha: manda pra quem pediu (versões novas) ou pra todos que não recusaram (versões antigas)
+const wantsMyScreen = (m) => ((m.proto || 2) >= 4 ? !!m.wantsScreen : !m.noWatch);
 function toggleFullscreen(tile) {
   if (document.fullscreenElement) document.exitFullscreen(); else tile.requestFullscreen().catch(() => { });
 }
 
-function addTile(id, stream, isLocal) {
+// Tela de outra pessoa chegando (a sua própria tela NÃO aparece pra você)
+function addTile(id, stream) {
   let tile = $(`.tile[data-id="${id}"]`);
+  const s = voiceSession(), m = s && s.members.get(id);
   if (!tile) {
-    const s = voiceSession(), m = !isLocal && s && s.members.get(id);
     tile = document.createElement('div');
     tile.className = 'tile';
     tile.dataset.id = id;
+    tile.dataset.since = Date.now();
     tile.innerHTML = `<video autoplay playsinline></video>
       <div class="tile-top"><span class="live-pill">AO VIVO</span><span class="lbl"></span></div>
+      <div class="tile-hover-hint">Clique para ampliar</div>
       <div class="tile-bar">
-        ${isLocal ? '<span class="tb-hint">Prévia da sua tela</span>' : `
-        <div class="tb-vol" title="Volume do som da tela">
+        <div class="tb-vol" title="Volume do som da tela (só pra você)">
           <button class="tb-btn" data-tile="mute" title="Mutar/desmutar o som da tela">${m && m.screenVolume === 0 ? ICON.volOff : ICON.speaker}</button>
           <input type="range" min="0" max="100" value="${Math.round((m ? m.screenVolume : 1) * 100)}" data-vol="${id}" data-kind="screen">
-        </div>`}
+        </div>
         <span class="tb-space"></span>
-        ${isLocal ? '' : '<button class="tb-btn tb-text" data-tile="stop" title="Fecha essa tela (você pode voltar a assistir pelo ▶ AO VIVO)">✕ Parar de assistir</button>'}
+        <button class="tb-btn tb-text" data-tile="stop" title="Fecha essa tela pra você (dá pra voltar pelo ▶ AO VIVO)">✕ Parar de assistir</button>
         <button class="tb-btn" data-tile="focus"></button>
-        <button class="tb-btn" data-tile="full" title="Tela cheia (duplo clique)">${ICON.fullscreen}</button>
+        <button class="tb-btn" data-tile="full" title="Tela cheia (ou duplo clique)">${ICON.fullscreen}</button>
       </div>`;
     tile.addEventListener('click', (e) => {
-      const b = e.target.closest('[data-tile]');
       if (e.target.closest('input')) return;
+      const b = e.target.closest('[data-tile]');
       if (b) {
         e.stopPropagation();
         if (b.dataset.tile === 'full') return toggleFullscreen(tile);
@@ -287,7 +364,8 @@ function addTile(id, stream, isLocal) {
         if (b.dataset.tile === 'focus') return tile.classList.contains('focused') ? unfocusTiles() : focusTile(id);
       }
       if (e.target.closest('.tile-bar')) return;
-      // clique na imagem: amplia / volta
+      if (document.fullscreenElement) return;
+      // clique na imagem: amplia esta (ou volta pra grade se já estava ampliada)
       tile.classList.contains('focused') ? unfocusTiles() : focusTile(id);
     });
     tile.addEventListener('dblclick', (e) => { if (!e.target.closest('.tile-bar')) toggleFullscreen(tile); });
@@ -295,30 +373,26 @@ function addTile(id, stream, isLocal) {
   }
   tile.querySelector('.lbl').textContent = tileLabel(id);
   const v = tile.querySelector('video');
-  v.muted = isLocal || deaf;
-  v.dataset.local = isLocal ? '1' : '';
-  if (!isLocal) {
-    const s = voiceSession(), m = s && s.members.get(id);
-    if (m) v.volume = m.screenVolume;
-    applyOutput(v);
+  v.muted = deaf;
+  if (m) v.volume = m.screenVolume;
+  applyOutput(v);
+  // o mesmo stream chega 2x (vídeo + som): só troca se for outro, senão a imagem pisca/fica preta
+  if (v.srcObject !== stream) {
+    v.srcObject = stream;
+    tile.dataset.since = Date.now();
   }
-  v.srcObject = stream;
   v.play().catch(() => { });
-  updateTileButtons();
-  // se o usuário clicou em "Assistir" antes da tela chegar, ou é a única tela: já amplia
-  if (pendingFocus === id) { pendingFocus = null; focusTile(id); }
-  ui.refresh();
+  // pediu pra assistir essa tela ("▶ AO VIVO") antes dela chegar: amplia
+  if (pendingFocus === id) { pendingFocus = null; focusTile(id); } else layoutTiles();
 }
 function removeTile(id) {
   const tile = $(`.tile[data-id="${id}"]`);
   if (!tile) return;
   if (document.fullscreenElement === tile) document.exitFullscreen().catch(() => { });
+  const v = tile.querySelector('video'); if (v) v.srcObject = null;
   tile.remove();
-  if (!$('.tile.focused')) $('#tiles').classList.remove('has-focus');
-  updateTileButtons();
-  ui.refresh();
+  layoutTiles();
 }
-
 // ---------------------------------------------------------------- compartilhar tela
 // Bitrate máximo da transmissão: "auto" calcula pela resolução/FPS; o resto é fixo (Mbps). Teto: 10 Mbps.
 const BITRATES = [['auto', 'Automático'], ['2.5', '2,5 Mbps'], ['4', '4 Mbps'], ['6', '6 Mbps'], ['8', '8 Mbps'], ['10', '10 Mbps']];
@@ -387,14 +461,21 @@ async function readEncoder(pc) {
         out = known ? `${gpu ? '⚡ placa de vídeo' : 'processador'}${codec ? ' (' + codec + ')' : ''}` : codec;
       }
     });
-    if (out && out !== shareEncoderInfo) { shareEncoderInfo = out; const t = $('.tile[data-id="me"] .lbl'); if (t) t.textContent = tileLabel('me'); }
+    if (out && out !== shareEncoderInfo) { shareEncoderInfo = out; ui.refresh(); }
   } catch { }
 }
 
 function sendScreenTo(s, m) {
   const call = s.me.call(m.id, screenStream, { metadata: { kind: 'screen', cid: voice.cid }, sdpTransform: sdpPreferCodec });
   m.screenOut = call;
-  call.on('close', () => { if (m.screenOut === call) m.screenOut = null; });
+  call.on('close', () => {
+    if (m.screenOut !== call) return;
+    m.screenOut = null;
+    ui.refresh();
+    // a conexão da tela caiu (rede oscilou)? se ainda estou compartilhando, manda de novo
+    setTimeout(() => { if (screenStream && voiceSession() === s) reconcile(s); }, 1500);
+  });
+  call.on('error', (e) => console.warn('screen call error', e));
   const pc = call.peerConnection;
   if (!pc) return;
   preferCodec(pc); // reforço para renegociações (a proposta inicial já vai ajustada pelo sdpTransform)
@@ -515,7 +596,7 @@ async function startShare(sourceId, resKey, fps, audio, bitrate = 'auto') {
     shareInfo = `${r.w ? r.label : (st.height ? st.height + 'p' : 'Nativa')}${realFps} · ${fmtMbps(br)}`;
   }
   if (voiceSession() !== s) { stopShare(true); return; } // saiu do canal enquanto escolhia
-  addTile('me', screenStream, true);
+  // (a sua própria tela não aparece pra você: no palco fica só a barra "Você está ao vivo")
   s.sendState();
   reconcile(s);
 }
@@ -530,10 +611,11 @@ function stopShare(quiet) {
   if (s) {
     for (const m of s.members.values()) {
       m.noWatch = false;
+      m.wantsScreen = false; // próxima vez que eu compartilhar, cada um escolhe de novo se quer ver
       if (m.screenOut) { const c = m.screenOut; m.screenOut = null; c.close(); }
     }
     s.broadcast({ t: 'screen-stop' });
     if (!quiet) s.sendState();
   }
-  removeTile('me');
+  ui.refresh();
 }

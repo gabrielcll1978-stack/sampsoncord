@@ -93,9 +93,12 @@ function ytBadge(p) {
   if (!(p.me || (p.vc === voice.cid && vs.members.get(p.id) === p))) return '';
   return '<span class="yt-badge" title="Colocou o vídeo do YouTube que está passando">▶</span>';
 }
-const badges = (p, s) => ytBadge(p) + (p.sharing
-  ? `<span class="live-pill${s ? ' watch' : ''}"${s ? ` data-action="watch" data-code="${s.code}" data-id="${esc(p.id)}" title="Assistir a tela"` : ''}>${s ? '▶ ' : ''}AO VIVO</span>`
-  : '') + (p.deaf ? ICON_DEAF : p.muted ? ICON_MIC_OFF : '');
+const badges = (p, s) => {
+  const w = s && !p.me; // a própria tela não é "assistível" (não aparece pra quem compartilha)
+  return ytBadge(p) + (p.sharing
+    ? `<span class="live-pill${w ? ' watch' : ''}"${w ? ` data-action="watch" data-code="${s.code}" data-id="${esc(p.id)}" title="Assistir a tela"` : ' title="Você está compartilhando"'}>${w ? '▶ ' : ''}AO VIVO</span>`
+    : '') + (p.deaf ? ICON_DEAF : p.muted ? ICON_MIC_OFF : '');
+};
 
 // Sliders de volume de uma pessoa (voz e, se estiver compartilhando, som da tela)
 function volumeSliders(m) {
@@ -168,11 +171,9 @@ const ui = {
     }
   },
   // Alguém do meu canal de voz começou a compartilhar a tela
+  // (a tela não abre sozinha: só chega se a pessoa clicar em "Assistir")
   onShareStarted(s, m) {
-    const v = viewOf(s);
-    const looking = active === s.code && v.type === 'voice' && v.cid === m.vc && document.hasFocus();
-    if (!$('#tiles .tile')) pendingFocus = m.id; // primeira tela do canal: já abre ampliada
-    if (!looking) toast(`🖥️ ${m.name} começou a compartilhar a tela`, { label: 'Assistir', fn: () => watchScreen(s.code, m.id) });
+    toast(`🖥️ ${m.name} começou a compartilhar a tela`, { label: '▶ Assistir', fn: () => watchScreen(s.code, m.id) });
   },
   onProfileChanged() {
     this.refresh();
@@ -292,25 +293,24 @@ function renderMembers() {
   const el = $('#members');
   if (!s) { el.classList.add('hidden'); return; }
   el.classList.remove('hidden');
-  const list = [{ id: 'me', uid: user.id, name: user.name + ' (você)', vc: voice.code === s.code ? voice.cid : null, muted, deaf, sharing: voice.code === s.code && screenStream ? shareInfo : null, me: true },
+  // Lista simples: foto, nome e o que a pessoa está jogando/usando (ou o status personalizado).
+  // Volumes e o resto ficam no botão direito do nome / no clique (perfil).
+  const list = [{ id: 'me', uid: user.id, name: user.name + ' (você)', activity: settings.showActivity ? myActivity : null, me: true },
     ...[...s.members.values()].filter((m) => m.named)];
   let html = `<div class="section-title">ONLINE — ${list.length}</div>`;
   for (const p of list) {
-    const ch = p.vc && s.channel(p.vc);
     const sp = p.me ? 'me' : p.id;
-    const canVol = !p.me && inMyChannel(s, p);
     const pr = profileOf(p.uid) || {};
-    const old = !p.me && window.APP_VERSION && (!p.version || cmpVersion(p.version, window.APP_VERSION) < 0);
-    html += `<div class="member ${speaking.has(sp) ? 'speaking' : ''}" data-speak="${sp}" data-action="profile" data-uid="${esc(p.uid || '')}">
+    const sub = activityText(p.activity) || pr.custom || '';
+    const color = roleColor(s.state, p.uid);
+    html += `<div class="member ${speaking.has(sp) ? 'speaking' : ''}" data-speak="${sp}" data-action="profile" data-uid="${esc(p.uid || '')}"
+      title="${p.me ? 'Você' : 'Clique: perfil · Botão direito: volumes'}">
       ${avatarHTML(p, '', true)}
-      <div class="info"><div class="mname" ${roleColor(s.state, p.uid) ? `style="color:${roleColor(s.state, p.uid)}"` : ''}>${esc(p.name)}${old ? ' <span class="old-tag" title="Está com uma versão antiga do Sampsoncord">antiga</span>' : ''}</div>
-        ${ch ? `<div class="msub">${ICON.speaker}${esc(ch.name)}</div>` : pr.custom ? `<div class="msub">${esc(pr.custom)}</div>` : ''}
-        ${canVol ? volumeSliders(p) : ''}
-      </div><span class="badges">${badges(p, p.vc ? s : null)}</span></div>`;
+      <div class="info"><div class="mname" ${color ? `style="color:${color}"` : ''}>${esc(p.name)}</div>
+        ${sub ? `<div class="msub ${p.activity ? 'act' : ''}">${esc(sub)}</div>` : ''}
+      </div></div>`;
   }
   if (s.members.size === 0) html += `<div class="muted pad small">Ninguém mais online. Convide a galera com o código <b>${fmtCode(s.code)}</b>.</div>`;
-  // não re-renderiza enquanto arrasta o volume
-  if (document.activeElement && document.activeElement.dataset && document.activeElement.dataset.vol && el.contains(document.activeElement)) return;
   el.innerHTML = html;
 }
 
@@ -424,6 +424,17 @@ function renderVoiceView() {
   const join = $('#voice-join');
   $('#tiles').classList.toggle('hidden', !here);
   $('#voice-controls').classList.toggle('hidden', !here);
+  // barra de quem está compartilhando (no lugar da prévia da própria tela)
+  const banner = $('#share-banner');
+  if (here && screenStream) {
+    const n = shareViewers();
+    banner.innerHTML = `<span class="sb-dot"></span><b>Você está compartilhando sua tela</b>
+      <span class="sb-info">${esc(shareInfo || '')}${shareEncoderInfo ? ' · ' + esc(shareEncoderInfo) : ''}</span>
+      <span class="sb-viewers">👁 ${n} ${n === 1 ? 'pessoa assistindo' : 'pessoas assistindo'}</span>
+      <span class="tb-space"></span>
+      <button class="danger-solid sm" data-action="share">⏹ Parar de compartilhar</button>`;
+    banner.classList.remove('hidden');
+  } else banner.classList.add('hidden');
   if (!here) {
     const people = voiceParticipants(s, v.cid);
     join.classList.remove('hidden');
@@ -438,11 +449,12 @@ function renderVoiceView() {
   $('#voice-view').classList.toggle('with-tiles', hasTiles);
   $('#voice-people').innerHTML = voiceParticipants(s, v.cid).map((p) => {
     const sp = p.me ? 'me' : p.id;
-    const watching = p.sharing && $(`.tile.focused[data-id="${sp}"]`);
+    // botão "Assistir" só para telas de outras pessoas que não estão no palco (parou de assistir / ainda chegando)
+    const visible = !p.me && $(`.tile[data-id="${sp}"]`);
     return `<div class="person ${speaking.has(sp) ? 'speaking' : ''} ${p.sharing ? 'sharing' : ''}" data-speak="${sp}" data-action="profile" data-uid="${esc(p.uid || '')}">
       ${avatarHTML(p, 'xl')}
       <div class="pname">${esc(p.name)} ${badges(p, s)}</div>
-      ${p.sharing && !watching ? `<button class="primary sm watch-btn" data-action="watch" data-code="${s.code}" data-id="${sp}">▶ ${p.me ? 'Ver minha tela' : 'Assistir tela'}</button>` : ''}
+      ${p.sharing && !p.me && !visible ? `<button class="primary sm watch-btn" data-action="watch" data-code="${s.code}" data-id="${sp}">▶ ${p.watching ? 'Carregando tela…' : 'Assistir tela'}</button>` : ''}
     </div>`;
   }).join('');
   $('#vc-mute').innerHTML = muted ? ICON.micOff : ICON.mic;
@@ -687,12 +699,80 @@ function watchScreen(code, id) {
   renderAll();
 }
 
+// acha um membro (pelo id de conexão) em qualquer servidor
+function findMember(id) {
+  for (const s of sessions.values()) { const m = s.members.get(id); if (m) return { s, m }; }
+  return null;
+}
+
 document.addEventListener('input', (e) => {
   const id = e.target.dataset && e.target.dataset.vol;
   if (!id) return;
-  const s = voiceSession(), m = s && s.members.get(id);
-  if (m) setMemberVolume(m, e.target.dataset.kind === 'screen' ? 'screen' : 'voice', e.target.value / 100);
+  const f = findMember(id);
+  if (!f) return;
+  const kind = e.target.dataset.kind === 'screen' ? 'screen' : 'voice';
+  setMemberVolume(f.m, kind, e.target.value / 100);
+  $$(`#user-menu [data-val="${kind}"]`).forEach((el) => (el.textContent = e.target.value + '%'));
+  $$(`#user-menu [data-um="mute-${kind}"]`).forEach((b) => (b.innerHTML = +e.target.value === 0 ? ICON.volOff : ICON.speaker));
 });
+
+// ---------------------------------------------------------------- botão direito numa pessoa: volumes só pra você
+function openUserMenu(s, m, x, y) {
+  const menu = $('#user-menu');
+  const row = (kind, label, vol) => `
+    <div class="um-label">${label}<span class="um-val" data-val="${kind}">${Math.round(vol * 100)}%</span></div>
+    <div class="um-slider">
+      <button class="tb-btn" data-um="mute-${kind}" title="Mutar/desmutar só pra você">${vol === 0 ? ICON.volOff : ICON.speaker}</button>
+      <input type="range" min="0" max="100" value="${Math.round(vol * 100)}" data-vol="${m.id}" data-kind="${kind}">
+    </div>`;
+  menu.innerHTML = `
+    <div class="um-head">${avatarHTML(m, 'xs')}<b>${esc(m.name)}</b></div>
+    ${row('voice', '🎙️ Volume da voz', m.volume)}
+    ${m.sharing ? row('screen', '🖥️ Volume do som da tela', m.screenVolume) : '<div class="muted small um-note">🖥️ O volume da tela aparece aqui quando a pessoa estiver compartilhando.</div>'}
+    <div class="muted small um-note">Só muda pra você; os outros continuam ouvindo normal.</div>
+    <div class="dd-sep"></div>
+    ${m.sharing && !$(`.tile[data-id="${m.id}"]`) ? '<button class="um-item" data-um="watch">▶ Assistir tela</button>' : ''}
+    <button class="um-item" data-um="profile">👤 Ver perfil</button>`;
+  menu.dataset.id = m.id;
+  menu.dataset.code = s.code;
+  menu.classList.remove('hidden');
+  // posiciona no mouse sem sair da janela
+  const r = menu.getBoundingClientRect();
+  menu.style.left = Math.min(x, innerWidth - r.width - 8) + 'px';
+  menu.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
+}
+const closeUserMenu = () => $('#user-menu').classList.add('hidden');
+
+document.addEventListener('contextmenu', (e) => {
+  const el = e.target.closest('[data-speak]');
+  if (!el) return;
+  e.preventDefault();
+  if (el.dataset.speak === 'me') return closeUserMenu();
+  const f = findMember(el.dataset.speak);
+  if (f && f.m.named) openUserMenu(f.s, f.m, e.clientX, e.clientY);
+});
+$('#user-menu').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-um]');
+  if (!b) return;
+  e.stopPropagation();
+  const f = findMember($('#user-menu').dataset.id);
+  if (!f) return closeUserMenu();
+  const { s, m } = f;
+  const a = b.dataset.um;
+  if (a === 'mute-voice' || a === 'mute-screen') {
+    const kind = a === 'mute-voice' ? 'voice' : 'screen';
+    const key = kind === 'voice' ? 'volume' : 'screenVolume', prevKey = kind === 'voice' ? 'prevVolume' : 'prevScreenVolume';
+    if (m[key] > 0) { m[prevKey] = m[key]; setMemberVolume(m, kind, 0); } else setMemberVolume(m, kind, m[prevKey] || 1);
+    const v = Math.round(m[key] * 100);
+    const inp = $(`#user-menu input[data-kind="${kind}"]`); if (inp) inp.value = v;
+    $(`#user-menu [data-val="${kind}"]`).textContent = v + '%';
+    b.innerHTML = v === 0 ? ICON.volOff : ICON.speaker;
+  } else if (a === 'watch') { closeUserMenu(); watchScreen(s.code, m.id); }
+  else if (a === 'profile') { closeUserMenu(); if (m.uid) openProfileCard(m.uid); }
+});
+document.addEventListener('mousedown', (e) => { if (!e.target.closest('#user-menu')) closeUserMenu(); }, true);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeUserMenu(); });
+window.addEventListener('blur', closeUserMenu);
 
 // ---------------------------------------------------------------- enviar mensagem (texto + imagem)
 let pendingImage = null; // { data, w, h } esperando o "enviar"
@@ -983,6 +1063,11 @@ function openProfileCard(uid) {
       <div class="pc-body">
         <h2>${esc(p.name || 'Sem nome')}</h2>
         <div class="pc-status"><i class="sdot inline ${st.cls}"></i>${st.label}</div>
+        ${(() => { // atividade agora (jogo/app)
+          let act = isMe && settings.showActivity ? myActivity : null;
+          if (!isMe) for (const s of sessions.values()) for (const m of s.members.values()) if (m.uid === uid && m.activity) act = m.activity;
+          return act ? `<div class="pc-activity">${esc(activityText(act))}</div>` : '';
+        })()}
         ${p.custom ? `<div class="pc-custom">${esc(p.custom)}</div>` : ''}
         ${ver ? `<div class="muted small">${ver === 'antiga' ? '⚠ Versão antiga do Sampsoncord (anterior à 1.3)' : 'Sampsoncord v' + esc(ver)}</div>` : ''}
         ${where ? `<div class="pc-section"><div class="section-title">NA VOZ</div><div class="pc-where">${ICON.speaker}${esc(where)}</div></div>` : ''}
@@ -1024,6 +1109,7 @@ async function openSettingsModal() {
         `<button type="button" class="theme-opt ${(settings.theme || 'dark') === k ? 'on' : ''}" data-theme="${k}">${l}</button>`).join('')}
     </div>
     <div class="section-title">SISTEMA</div>
+    <label class="check"><input type="checkbox" id="set-activity" ${settings.showActivity ? 'checked' : ''} ${IS_WEB ? 'disabled' : ''}> Mostrar para o servidor o jogo/app que estou usando ("🎮 Jogando…")${IS_WEB ? ' — só no app instalado' : ''}</label>
     <label class="check"><input type="checkbox" id="set-autostart" ${window.desktop && window.desktop.getAutostart ? '' : 'disabled'}> Iniciar o Sampsoncord junto com o Windows (abre minimizado)${IS_WEB ? ' — só no app instalado' : ''}</label>
     <div class="section-title">VOZ</div>
     <label class="field">Microfone<select id="set-mic"><option value="">Padrão do Windows</option></select></label>
@@ -1040,6 +1126,7 @@ async function openSettingsModal() {
   async (card) => {
     // o teste do mic para sozinho quando o modal fecha (o medidor sai da tela)
     card.querySelector('[data-x]').onclick = () => { cleanup(); closeModal(); };
+    card.querySelector('#set-activity').onchange = (e) => { settings.showActivity = e.target.checked; saveSettings(); myActivity = null; checkActivity(); for (const s of sessions.values()) s.sendState(); };
     const auto = card.querySelector('#set-autostart');
     if (window.desktop && window.desktop.getAutostart) {
       window.desktop.getAutostart().then((on) => (auto.checked = !!on)).catch(() => { });
@@ -1098,6 +1185,23 @@ async function openSettingsModal() {
     };
   });
 }
+
+// ---------------------------------------------------------------- o que estou jogando (só no app instalado)
+let myActivity = null;
+async function checkActivity() {
+  if (!user || !window.desktop || !window.desktop.getActivity) return;
+  let a = null;
+  if (settings.showActivity) {
+    const r = await window.desktop.getActivity().catch(() => null);
+    a = r ? cleanActivity({ k: r.kind, n: r.name, v: r.verb }) : null;
+  }
+  if (JSON.stringify(a) === JSON.stringify(myActivity)) return;
+  myActivity = a;
+  for (const s of sessions.values()) s.sendState();
+  ui.refresh();
+}
+setInterval(checkActivity, 20000);
+setTimeout(checkActivity, 4000);
 
 // ---------------------------------------------------------------- ausente automático + atalhos globais
 setInterval(async () => {

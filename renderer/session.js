@@ -13,7 +13,7 @@
  */
 
 const sessions = new Map(); // código -> ServerSession
-const PROTO = 3; // 1 = salas por nome (primeiro .exe), 2 = servidores com código, 3 = + versão/assistir
+const PROTO = 4; // 1 = salas por nome (primeiro .exe), 2 = servidores com código, 3 = + versão/assistir, 4 = tela só pra quem pede
 
 // Compara versões "1.2.10" x "1.3.0": negativo se a < b
 function cmpVersion(a, b) {
@@ -269,9 +269,11 @@ class ServerSession {
       if (m && m.conn && m.conn.open) return;
       try { c.close(); } catch { }
       if (this.gone.has(id)) return; // a pessoa simplesmente saiu, não é problema de rede
+      // 1ª falha: pode ser só uma conexão antiga de alguém que reabriu o app. Tenta de novo antes de avisar.
+      if (retry) { setTimeout(() => { if (!this.closed && !this.members.has(id)) this.connectTo(id, false); }, 20000); return; }
+      // 2ª falha seguida: aí sim mostra "Não consegui conectar com X pessoa(s)"
       this.failed.add(id);
       ui.refresh();
-      if (retry) setTimeout(() => { if (!this.closed && !this.members.has(id)) this.connectTo(id, false); }, 20000);
     }, 15000);
   }
 
@@ -323,6 +325,7 @@ class ServerSession {
       name: user.name, muted, deaf,
       vc: inVoice ? voice.cid : null,
       sharing: inVoice && screenStream ? shareInfo : null,
+      act: settings.showActivity && myActivity ? myActivity : null, // o que estou jogando/usando
     };
   }
   helloMsg() {
@@ -346,10 +349,12 @@ class ServerSession {
   applyPresence(m, d) {
     const prevVc = m.vc;
     const wasSharing = m.sharing;
+    if (typeof d.sharing === 'string' && !wasSharing) m.sharingSince = Date.now(); // pra saber se a tela demorou a chegar
     const prevName = m.name;
     m.name = cleanName(d.name, 24) || m.name || 'Anônimo';
     if (m.uid && prevName && prevName !== m.name) cacheProfile(m.uid, m.name, m.profile || {});
     m.muted = !!d.muted; m.deaf = !!d.deaf;
+    m.activity = cleanActivity(d.act);
     m.vc = typeof d.vc === 'string' ? d.vc : null;
     m.sharing = typeof d.sharing === 'string' ? d.sharing.slice(0, 32) : null;
     if (voice.code === this.code && voice.cid) {
@@ -357,7 +362,7 @@ class ServerSession {
       else if (prevVc === voice.cid && m.vc !== voice.cid) announceVoice(m.name, false);
     }
     if (!m.sharing && m.screenIn) { const c = m.screenIn; m.screenIn = null; c.close(); removeTile(m.id); }
-    if (!m.sharing) m.unwatched = false; // próxima vez que compartilhar, volta a aparecer
+    if (!m.sharing) m.watching = false; // parou de compartilhar: da próxima vez só vejo se clicar de novo
     if (m.sharing && !wasSharing && m.named && m.vc && voice.code === this.code && voice.cid === m.vc) ui.onShareStarted(this, m);
   }
 
@@ -369,7 +374,8 @@ class ServerSession {
         m.uid = String(d.uid || '').slice(0, 32);
         m.version = typeof d.v === 'string' && /^\d+\.\d+\.\d+$/.test(d.v) ? d.v : '';
         m.proto = +d.proto || 2;
-        this.failed.delete(id);
+        this.failed.clear(); // conectou alguém: o aviso antigo provavelmente era de uma conexão que já morreu
+        this.gone.clear();
         m.named = true;
         m.volume = getVol(m.uid, 'voice');
         m.screenVolume = getVol(m.uid, 'screen');
@@ -416,11 +422,16 @@ class ServerSession {
       // quem assiste avisa que parou / voltou a assistir minha tela
       case 'unwatch':
         m.noWatch = true;
+        m.wantsScreen = false;
         if (m.screenOut) { const c = m.screenOut; m.screenOut = null; c.close(); }
         break;
       case 'watch':
         m.noWatch = false;
+        m.wantsScreen = true; // pediu pra assistir minha tela
         reconcile(this);
+        break;
+      case 'screen-req': // alguém do meu canal não está recebendo minha tela: refaço a conexão dele
+        resendScreenTo(this, m);
         break;
       case 'screen-stop':
         if (m.screenIn) { const c = m.screenIn; m.screenIn = null; c.close(); }
