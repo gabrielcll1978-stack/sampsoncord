@@ -490,3 +490,19 @@ kbd { background: var(--bg-rail); border: 1px solid var(--bg4); border-bottom-wi
 /* ---------- versão web ---------- */
 .web-note { font-size: 12px; color: var(--muted); background: var(--bg1); border-radius: 8px; padding: 8px 10px; text-align: center; line-height: 1.4; }
 .web-note a { color: #00a8fc; }
+
+.claim-warn { background: #5865f222; border: 1px solid #5865f266; color: var(--text); font-size: 12px; text-align: left;
+  padding: 6px 10px; margin: 8px 8px 0; width: calc(100% - 16px); border-radius: 6px; line-height: 1.35; }
+.claim-warn:hover { background: #5865f244; filter: none; }
+.row .del-ch + .del-ch { margin-left: -4px; }
+
+/* apagar mensagem */
+.msg { position: relative; }
+.msg-del { position: absolute; right: 16px; top: -10px; display: none; background: var(--bg2); border: 1px solid var(--line);
+  padding: 2px 8px; font-size: 14px; border-radius: 6px; box-shadow: 0 2px 6px #0003; z-index: 1; }
+.msg:hover .msg-del { display: block; }
+.msg-del:hover { background: var(--red); filter: none; }
+.msg.cont .msg-del { top: -14px; }
+.round.yt-round.pending { background: #ff0033; color: #fff; animation: pulse 1.4s infinite ease-in-out; }
+.yt-badge { background: #ff0033; color: #fff; font-size: 9px; font-weight: 700; width: 20px; height: 14px; border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }

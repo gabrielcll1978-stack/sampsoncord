@@ -23,9 +23,10 @@ const srvOwner = (st) => (st.owner && st.owner.uid) || null;
 const roleIdsOf = (st, uid) => (st.perms && st.perms.members && st.perms.members[uid]) || [];
 const rolesOf = (st, uid) => roleIdsOf(st, uid).map((id) => st.perms.roles[id]).filter(Boolean);
 
-// uid tem a permissão? Servidor sem dono = todo mundo pode (como era antes dos cargos)
+// uid tem a permissão? Só o dono (criador) e quem ele der cargo com permissão.
+// Servidor antigo sem dono: ninguém mexe em canais/cargos até o criador clicar em "Tornar-me dono".
 function can(st, uid, perm) {
-  if (!st.owner) return true;
+  if (!st.owner) return false;
   if (uid && uid === st.owner.uid) return true;
   return rolesOf(st, uid).some((r) => r.admin || r[perm]);
 }

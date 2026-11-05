@@ -38,7 +38,7 @@ function openServerSettings(s) {
       <label class="field">Nome do servidor<input id="ss-name" maxlength="40" value="${esc(s.name)}" ${canServer ? '' : 'disabled'}></label>
       <div class="ss-owner">${ownerName ? `👑 Dono: <b>${esc(ownerName)}</b>` : 'Este servidor ainda não tem dono (foi criado antes dos cargos existirem).'}</div>
       ${!srvOwner(st) ? `<button type="button" class="sm" id="ss-claim">👑 Tornar-me dono deste servidor</button>
-        <p class="muted small">O dono pode criar cargos e definir quem acessa cada canal. Enquanto não houver dono, todo mundo pode tudo.</p>` : ''}
+        <p class="muted small">O dono pode criar cargos e definir quem acessa cada canal. Enquanto não houver dono, ninguém pode mexer em canais e cargos — quem criou o servidor deve clicar aqui.</p>` : ''}
     </div>
 
     <div data-pane="cargos" class="ss-pane hidden">

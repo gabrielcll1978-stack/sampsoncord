@@ -51,17 +51,25 @@ function mergeServer(a, b) {
     if (!c || typeof c.id !== 'string' || c.id.length > 16 || !['text', 'voice'].includes(c.type)) continue;
     const mine = a.channels[c.id];
     if (!mine) {
-      a.channels[c.id] = { id: c.id, name: cleanName(c.name, 30) || 'canal', type: c.type, ts: +c.ts || 0, deleted: !!c.deleted };
+      a.channels[c.id] = { id: c.id, name: cleanName(c.name, 30) || 'canal', type: c.type, ts: +c.ts || 0, deleted: !!c.deleted, nameTs: +c.nameTs || 0 };
       changed = true;
-    } else if (c.deleted && !mine.deleted) {
-      mine.deleted = true; changed = true;
+    } else {
+      if (c.deleted && !mine.deleted) { mine.deleted = true; changed = true; }
+      // canal renomeado: vale o nome mais recente
+      if ((+c.nameTs || 0) > (mine.nameTs || 0) && cleanName(c.name, 30)) { mine.name = cleanName(c.name, 30); mine.nameTs = +c.nameTs; changed = true; }
     }
   }
   return changed;
 }
 
 function cleanMsg(m) {
-  if (!m || typeof m.id !== 'string' || m.id.length > 24 || typeof m.text !== 'string') return null;
+  if (!m || typeof m.id !== 'string' || m.id.length > 24) return null;
+  // mensagem apagada ("lápide"): guarda só quem escreveu e quem apagou, pra ela nunca voltar
+  if (m.deleted) {
+    return { id: m.id, ts: Math.min(+m.ts || 0, Date.now() + 60000), author: cleanName(m.author, 24) || 'Anônimo',
+      uid: String(m.uid || '').slice(0, 32), by: String(m.by || '').slice(0, 32), text: '', deleted: true };
+  }
+  if (typeof m.text !== 'string') return null;
   const text = m.text.slice(0, 2000);
   // anexo de imagem: só os dados de referência (a imagem em si vai separada, sob demanda)
   let att = null;
@@ -120,12 +128,21 @@ class ServerSession {
   addMsgs(cid, list) {
     if (!this.channel(cid) || !Array.isArray(list)) return 0;
     const cur = this.msgs(cid);
-    const ids = new Set(cur.map((m) => m.id));
+    const byId = new Map(cur.map((m, i) => [m.id, i]));
     let added = 0;
     for (const raw of list) {
       const m = cleanMsg(raw);
-      if (!m || ids.has(m.id)) continue;
-      cur.push(m); ids.add(m.id); added++;
+      if (!m) continue;
+      if (byId.has(m.id)) {
+        // chegou a lápide de uma mensagem que eu tenho: apaga se quem pediu é o autor ou um administrador
+        const i = byId.get(m.id), old = cur[i];
+        if (m.deleted && !old.deleted && (m.by === old.uid || can(this.state, m.by, 'admin'))) {
+          cur[i] = { ...m, uid: old.uid, author: old.author, ts: old.ts };
+          added++;
+        }
+        continue;
+      }
+      cur.push(m); byId.set(m.id, cur.length - 1); added++;
     }
     if (added) { cur.sort((a, b) => a.ts - b.ts); store.set(this.msgKey(cid), cur.slice(-500)); }
     return added;
@@ -394,7 +411,7 @@ class ServerSession {
         break;
       case 'msg':
         if (typeof d.cid !== 'string' || !canAccess(this.state, user.id, d.cid)) break;
-        if (this.addMsgs(d.cid, [d.m])) ui.onMessage(this, d.cid, true);
+        if (this.addMsgs(d.cid, [d.m])) ui.onMessage(this, d.cid, !(d.m && d.m.deleted)); // apagada: sem som/notificação
         break;
       // quem assiste avisa que parou / voltou a assistir minha tela
       case 'unwatch':
@@ -444,6 +461,13 @@ class ServerSession {
     store.del(this.msgKey(cid));
     this.pushServer();
   }
+  renameChannel(cid, name) {
+    const c = this.channel(cid);
+    if (!c) return;
+    c.name = cleanName(name, 30);
+    c.nameTs = Date.now();
+    this.pushServer();
+  }
   setIcon(dataUrl) {
     this.state.icon = dataUrl || '';
     this.state.iconTs = Date.now();
@@ -454,6 +478,21 @@ class ServerSession {
     this.state.nameTs = Date.now();
     this.pushServer();
   }
+  // Apagar mensagem para todos (autor, ou dono/administrador)
+  deleteMsg(cid, id) {
+    const msg = this.msgs(cid).find((m) => m.id === id);
+    if (!msg || msg.deleted) return;
+    if (msg.uid !== user.id && !can(this.state, user.id, 'admin')) return;
+    const tomb = { id, ts: msg.ts, author: msg.author, uid: msg.uid, by: user.id, deleted: true, text: '' };
+    this.addMsgs(cid, [tomb]);
+    for (const mm of this.members.values()) {
+      if (!mm.conn || !mm.conn.open) continue;
+      if (this.isRestricted(cid) && !(mm.named && canAccess(this.state, mm.uid, cid))) continue;
+      try { mm.conn.send({ t: 'msg', cid, m: tomb }); } catch { }
+    }
+  }
+  canDeleteMsg(msg) { return !msg.deleted && (msg.uid === user.id || can(this.state, user.id, 'admin')); }
+
   // att: { id, w, h } de uma imagem já guardada em attachments
   sendMsg(cid, text, att) {
     const m = { id: rand(12), text: String(text || '').slice(0, 2000), ts: Date.now(), author: user.name, uid: user.id };

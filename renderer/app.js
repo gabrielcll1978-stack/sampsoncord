@@ -86,7 +86,14 @@ const activeSession = () => (active ? sessions.get(active) : null);
 const ICON_MIC_OFF = '<svg class="ico-red" viewBox="0 0 24 24"><title>mutado</title><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5a3 3 0 0 0-6 0v.18l5.98 5.99zM4.27 3 3 4.27l6.01 6.01V11a3 3 0 0 0 3 3c.22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52a5.2 5.2 0 0 1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>';
 const ICON_DEAF = '<svg class="ico-red" viewBox="0 0 24 24"><title>ensurdecido</title><path d="M12 3a9 9 0 0 0-9 9v6a3 3 0 0 0 3 3h2v-8H5v-1a7 7 0 0 1 14 0v1h-3v8h2a3 3 0 0 0 3-3v-6a9 9 0 0 0-9-9z"/><path d="M3 4.3 4.3 3 21 19.7 19.7 21z"/></svg>';
 // s: sessão — quando passada, o "AO VIVO" vira botão de assistir
-const badges = (p, s) => (p.sharing
+// ícone do YouTube em quem colocou o vídeo que está rolando no meu canal de voz
+function ytBadge(p) {
+  const owner = watchTogether.ownerUid, vs = voiceSession();
+  if (!owner || !vs || p.uid !== owner) return '';
+  if (!(p.me || (p.vc === voice.cid && vs.members.get(p.id) === p))) return '';
+  return '<span class="yt-badge" title="Colocou o vídeo do YouTube que está passando">▶</span>';
+}
+const badges = (p, s) => ytBadge(p) + (p.sharing
   ? `<span class="live-pill${s ? ' watch' : ''}"${s ? ` data-action="watch" data-code="${s.code}" data-id="${esc(p.id)}" title="Assistir a tela"` : ''}>${s ? '▶ ' : ''}AO VIVO</span>`
   : '') + (p.deaf ? ICON_DEAF : p.muted ? ICON_MIC_OFF : '');
 
@@ -224,13 +231,14 @@ function renderSidebar() {
   const status = s.online ? `<span class="dot on"></span>${s.onlineCount()} online` : '<span class="dot"></span>conectando…';
   let html = `<div class="srv-status">${status}</div>`;
   if (s.failed.size) html += `<button class="conn-warn" data-action="conn-help">⚠ Não consegui conectar com ${s.failed.size} pessoa${s.failed.size > 1 ? 's' : ''}. Por quê?</button>`;
+  if (!srvOwner(st)) html += `<button class="claim-warn" data-action="claim-owner">👑 Este servidor ainda não tem dono, então ninguém pode mexer nos canais. Foi você quem criou? Clique para virar o dono.</button>`;
 
   html += `<div class="section-title">CANAIS DE TEXTO ${canCh ? '<button class="add-ch" data-action="add-channel" data-type="text" title="Criar canal de texto">+</button>' : ''}</div>`;
   for (const c of s.visibleChannels('text')) {
     const sel = v.type === 'text' && v.cid === c.id;
     html += `<div class="row ch ${sel ? 'active' : ''} ${s.unread.has(c.id) ? 'unread' : ''}" data-action="channel" data-cid="${c.id}">
       <span class="ch-ico">#</span><span class="row-name">${esc(c.name)}${lock(c)}</span>
-      ${canCh ? `<button class="del-ch" data-action="del-channel" data-cid="${c.id}" title="Apagar canal">✕</button>` : ''}</div>`;
+      ${canCh ? `<button class="del-ch" data-action="rename-channel" data-cid="${c.id}" title="Renomear canal">✏️</button><button class="del-ch" data-action="del-channel" data-cid="${c.id}" title="Apagar canal">✕</button>` : ''}</div>`;
   }
   html += `<div class="section-title">CANAIS DE VOZ ${canCh ? '<button class="add-ch" data-action="add-channel" data-type="voice" title="Criar canal de voz">+</button>' : ''}</div>`;
   for (const c of s.visibleChannels('voice')) {
@@ -238,7 +246,7 @@ function renderSidebar() {
     const here = voice.code === s.code && voice.cid === c.id;
     html += `<div class="row ch ${sel ? 'active' : ''} ${here ? 'connected' : ''}" data-action="channel" data-cid="${c.id}">
       <span class="ch-ico">${ICON.speaker}</span><span class="row-name">${esc(c.name)}${lock(c)}</span>
-      ${canCh ? `<button class="del-ch" data-action="del-channel" data-cid="${c.id}" title="Apagar canal">✕</button>` : ''}</div>`;
+      ${canCh ? `<button class="del-ch" data-action="rename-channel" data-cid="${c.id}" title="Renomear canal">✏️</button><button class="del-ch" data-action="del-channel" data-cid="${c.id}" title="Apagar canal">✕</button>` : ''}</div>`;
     for (const p of voiceParticipants(s, c.id)) {
       const sp = p.me ? 'me' : p.id;
       html += `<div class="vc-user ${speaking.has(sp) ? 'speaking' : ''}" data-speak="${sp}" data-action="profile" data-uid="${esc(p.uid || '')}">
@@ -373,8 +381,10 @@ function renderChat(forceBottom) {
   let html = `<div class="chat-welcome"><div class="welcome-ico">#</div><h2>Bem-vindo(a) a #${esc(c.name)}!</h2><p class="muted">Esse é o começo do canal #${esc(c.name)}.</p></div>`;
   let prev = null;
   for (const m of s.msgs(v.cid)) {
+    if (m.deleted) continue; // apagada para todos
     const grouped = prev && prev.uid === m.uid && m.ts - prev.ts < 5 * 60e3;
-    const content = msgContent(m);
+    const del = s.canDeleteMsg(m) ? `<button class="msg-del" data-action="del-msg" data-mid="${esc(m.id)}" title="Apagar mensagem">🗑️</button>` : '';
+    const content = del + msgContent(m);
     const color = roleColor(s.state, m.uid) || colorFor(m.uid);
     if (grouped) html += `<div class="msg cont">${content}</div>`;
     else html += `<div class="msg"><span class="clickable" data-action="profile" data-uid="${esc(m.uid)}">${avatarHTML({ uid: m.uid, name: m.author })}</span><div class="body">
@@ -440,6 +450,8 @@ function renderVoiceView() {
   $('#vc-hangup').innerHTML = ICON.hangup;
   $('#vc-mute').classList.toggle('off', muted);
   $('#vc-share').classList.toggle('on-live', !!screenStream);
+  $('#vc-yt').classList.toggle('pending', watchTogether.hidden);
+  $('#vc-yt').title = watchTogether.hidden ? 'Voltar ao vídeo (os outros estão assistindo)' : 'Assistir YouTube junto';
   $('#vc-share').title = screenStream ? 'Parar de compartilhar' : 'Compartilhar tela';
   $$('#tiles .tile').forEach((t) => { if (t.dataset.id !== 'yt') t.querySelector('.lbl').textContent = tileLabel(t.dataset.id); });
 }
@@ -571,6 +583,30 @@ const actions = {
     setView(s, { type, cid: id });
     if (type === 'voice') joinVoice(s, id);
   },
+  'del-msg': (el) => {
+    const s = activeSession(), v = s && viewOf(s);
+    if (!s || v.type !== 'text') return;
+    const msg = s.msgs(v.cid).find((m) => m.id === el.dataset.mid);
+    if (!msg || !s.canDeleteMsg(msg)) return;
+    const preview = msg.att && msg.text === IMG_PLACEHOLDER ? '📷 imagem' : msg.text.slice(0, 80);
+    if (!confirm(`Apagar esta mensagem para todos?\n\n"${preview}"`)) return;
+    s.deleteMsg(v.cid, msg.id);
+    renderChat();
+  },
+  'rename-channel': async (el) => {
+    const s = activeSession(), c = s.channel(el.dataset.cid);
+    if (!c || !can(s.state, user.id, 'manageChannels')) return;
+    const name = await askText({ title: 'Renomear canal', label: 'Nome do canal', value: c.name, ok: 'Salvar' });
+    if (name) s.renameChannel(c.id, c.type === 'text' ? name.toLowerCase().replace(/\s+/g, '-') : name);
+  },
+  'claim-owner': () => {
+    const s = activeSession();
+    if (!s || srvOwner(s.state)) return;
+    if (!confirm('Você criou este servidor? Ao virar dono, só você (e quem você der cargo) poderá criar, renomear e apagar canais e mexer nos cargos.\n\nIsso vale para todos os membros.')) return;
+    s.state.owner = { uid: user.id, ts: Date.now() };
+    s.pushServer();
+    toast('👑 Agora você é o dono do servidor');
+  },
   'del-channel': (el) => {
     const s = activeSession(), c = s.channel(el.dataset.cid);
     if (c && confirm(`Apagar o canal "${c.name}" para todo mundo?`)) s.deleteChannel(c.id);
@@ -582,7 +618,7 @@ const actions = {
   account: () => openAccountModal(),
   settings: () => openSettingsModal(),
   watch: (el) => watchScreen(el.dataset.code, el.dataset.id),
-  yt: () => watchTogether.askLink(),
+  yt: () => (watchTogether.hidden ? watchTogether.rejoin() : watchTogether.askLink()),
   'server-settings': () => openServerSettings(activeSession()),
   'conn-help': () => openModal(`
     <h2>Por que não conectou?</h2>

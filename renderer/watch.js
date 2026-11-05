@@ -11,6 +11,8 @@ const watchTogether = (() => {
   let apiReady = null;
   let suppressUntil = 0;   // ignora eventos causados por comandos vindos de outra pessoa
   let tick = null;         // última posição vista (pra detectar quando alguém pulou o vídeo)
+  let hidden = false;      // saí do vídeo só pra mim (os outros continuam assistindo)
+  let known = null;        // enquanto escondido: { videoId, playing, pos, at } pra poder voltar no ponto certo
   let vol = store.get('salinha-ytvol', 60);
 
   function loadApi() {
@@ -51,6 +53,7 @@ const watchTogether = (() => {
           <input type="range" min="0" max="100" value="${vol}" data-ytvol>
         </div>
         <span class="tb-space"></span>
+        <button class="tb-btn tb-text" data-yt="leave" title="Fecha o vídeo só pra você; os outros continuam assistindo">🙈 Sair (só pra mim)</button>
         <button class="tb-btn tb-text" data-yt="change" title="Colocar outro vídeo">🔗 Trocar vídeo</button>
         <button class="tb-btn tb-text danger-hover" data-yt="stop" title="Fecha o vídeo para todo mundo do canal">✕ Parar para todos</button>
         <button class="tb-btn" data-tile="focus"></button>
@@ -64,6 +67,7 @@ const watchTogether = (() => {
       if (b.dataset.tile === 'focus') return tile.classList.contains('focused') ? unfocusTiles() : focusTile('yt');
       if (b.dataset.yt === 'stop') { send({ act: 'stop' }); stop(); toast('Você parou o vídeo para todos'); }
       if (b.dataset.yt === 'change') askLink();
+      if (b.dataset.yt === 'leave') leaveLocal();
       if (b.dataset.yt === 'mute') setVol(vol > 0 ? 0 : (store.get('salinha-ytvol-prev', 60) || 60), true);
     });
     tile.querySelector('[data-ytvol]').addEventListener('input', (e) => setVol(+e.target.value));
@@ -83,7 +87,8 @@ const watchTogether = (() => {
   // ------------------------------------------------------------ aplicar estado (vindo de mim ou de outra pessoa)
   async function apply(st) {
     if (!st || !/^[\w-]{11}$/.test(st.videoId) || !voice.code) return;
-    state = { videoId: st.videoId, playing: !!st.playing, pos: Math.max(0, +st.pos || 0) };
+    state = { videoId: st.videoId, playing: !!st.playing, pos: Math.max(0, +st.pos || 0), byUid: String(st.byUid || (state && state.byUid) || '').slice(0, 32) };
+    ui.refresh();
     ensureTile();
     try { await loadApi(); } catch (e) { toast(e.message); return; }
     if (!state) return; // parou enquanto carregava
@@ -142,18 +147,42 @@ const watchTogether = (() => {
     tick = { pos, t: now };
   }, 1000);
 
-  function stop() {
+  function destroyPlayer() {
     state = null;
     try { player && player.destroy(); } catch { }
     player = null;
     tick = null;
     removeTile('yt');
   }
+  function stop() {
+    destroyPlayer();
+    hidden = false; known = null;
+    ui.refresh();
+  }
+
+  // Sair do vídeo só pra mim: fecha o player aqui, os outros continuam. Dá pra voltar depois.
+  function leaveLocal() {
+    if (!state) return;
+    known = { videoId: state.videoId, playing: state.playing, pos: curPos(), at: Date.now(), byUid: state.byUid };
+    hidden = true;
+    destroyPlayer();
+    toast('Você saiu do vídeo. Os outros continuam assistindo.', { label: 'Voltar', fn: rejoin });
+    ui.refresh();
+  }
+  function rejoin() {
+    if (!hidden || !known) return;
+    const pos = known.pos + (known.playing ? (Date.now() - known.at) / 1000 : 0);
+    const st = { videoId: known.videoId, playing: known.playing, pos, byUid: known.byUid };
+    hidden = false; known = null;
+    apply(st);
+  }
+  const remember = (videoId, playing, pos, byUid) => { known = { videoId, playing, pos, at: Date.now(), byUid: byUid || (known && known.byUid) || '' }; };
 
   // ------------------------------------------------------------ ações
   function start(videoId) {
     if (!voice.code) return toast('Entre num canal de voz para assistir junto.');
-    apply({ videoId, playing: true, pos: 0 });
+    hidden = false; known = null;
+    apply({ videoId, playing: true, pos: 0, byUid: user.id });
     send({ act: 'load', videoId, pos: 0 });
     const s = voiceSession();
     if (s) { active = s.code; setView(s, { type: 'voice', cid: voice.cid }); renderAll(); }
@@ -172,12 +201,21 @@ const watchTogether = (() => {
     if (voice.code !== s.code || d.cid !== voice.cid || !inMyChannel(s, m)) return;
     const vid = typeof d.videoId === 'string' && /^[\w-]{11}$/.test(d.videoId) ? d.videoId : null;
     const pos = Math.max(0, +d.pos || 0);
+    // saí do vídeo só pra mim: não toco nada, só acompanho onde está pra poder voltar
+    if (hidden) {
+      if ((d.act === 'play' || d.act === 'pause') && vid) remember(vid, d.act === 'play', pos);
+      else if (d.act === 'load' && vid) {
+        remember(vid, true, pos, m.uid);
+        toast(`▶ ${m.name} colocou outro vídeo`, { label: 'Assistir', fn: rejoin });
+      } else if (d.act === 'stop') { hidden = false; known = null; ui.refresh(); }
+      return;
+    }
     switch (d.act) {
-      case 'load': if (vid) { apply({ videoId: vid, playing: true, pos }); toast(`▶ ${m.name} colocou um vídeo do YouTube`); } break;
+      case 'load': if (vid) { apply({ videoId: vid, playing: true, pos, byUid: m.uid }); toast(`▶ ${m.name} colocou um vídeo do YouTube`); } break;
       case 'play': if (vid) apply({ videoId: vid, playing: true, pos: pos + 0.3 }); break;
       case 'pause': if (vid) apply({ videoId: vid, playing: false, pos }); break;
       case 'stop': if (state) { stop(); toast(`${m.name} parou o vídeo`); } break;
-      case 'sync-req': if (state) send({ act: 'sync', state: { videoId: state.videoId, playing: state.playing, pos: curPos() } }, m); break;
+      case 'sync-req': if (state) send({ act: 'sync', state: { videoId: state.videoId, playing: state.playing, pos: curPos(), byUid: state.byUid } }, m); break;
       case 'sync': if (!state && d.state) apply(d.state); break;
     }
   }
@@ -185,11 +223,14 @@ const watchTogether = (() => {
   function onJoined() { setTimeout(() => send({ act: 'sync-req' }), 1500); }
   // Alguém (re)conectou e está no meu canal: mando o vídeo atual
   function onMemberHello(s, m) {
-    if (state && voice.code === s.code && inMyChannel(s, m)) send({ act: 'sync', state: { videoId: state.videoId, playing: state.playing, pos: curPos() } }, m);
+    if (state && voice.code === s.code && inMyChannel(s, m)) send({ act: 'sync', state: { videoId: state.videoId, playing: state.playing, pos: curPos(), byUid: state.byUid } }, m);
   }
   function setDeaf(v) { try { player && (v ? player.mute() : player.unMute()); } catch { } }
 
-  return { start, askLink, stop, onMessage, onJoined, onMemberHello, setDeaf, get active() { return !!state; } };
+  return { start, askLink, stop, rejoin, leaveLocal, onMessage, onJoined, onMemberHello, setDeaf,
+    get active() { return !!state; }, get hidden() { return hidden && !!known; },
+    // quem colocou o vídeo que está rolando no meu canal (pra mostrar o ícone do YouTube no nome)
+    get ownerUid() { return (state && state.byUid) || (hidden && known && known.byUid) || null; } };
 })();
 
 // botão "Assistir junto" das prévias de link do YouTube no chat
