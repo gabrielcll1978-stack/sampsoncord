@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' https://www.youtube.com https://s.ytimg.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' https://0.peerjs.com wss://0.peerjs.com; media-src 'self' blob: mediastream:; frame-src https://www.youtube.com https://www.youtube-nocookie.com;" />
+  <title>Sampsoncord</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ===== Entrada: só o apelido ===== -->
+  <div id="update-bar" class="update-bar hidden"></div>
+  <div id="login" class="screen"></div>
+
+  <!-- ===== App ===== -->
+  <div id="app" class="screen hidden">
+    <nav id="rail" class="rail"></nav>
+
+    <aside class="sidebar">
+      <div id="side-header" class="side-header"></div>
+      <div id="side-body" class="side-body"></div>
+      <div id="voice-panel" class="voice-panel hidden"></div>
+      <div id="status-menu" class="status-menu hidden"></div>
+      <div class="user-panel">
+        <button id="me-avatar-wrap" class="me-avatar-btn" data-speak="me" data-action="status-menu" title="Mudar status"></button>
+        <button class="me-info" data-action="account" title="Editar perfil">
+          <div id="me-name" class="me-name"></div>
+          <div id="me-status" class="me-status"></div>
+        </button>
+        <button id="btn-mute" class="icon-btn" data-action="mute" title="Mutar microfone">
+          <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/><line class="slash" x1="4" y1="3" x2="20" y2="21"/></svg>
+        </button>
+        <button id="btn-deaf" class="icon-btn" data-action="deaf" title="Ensurdecer">
+          <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v6a3 3 0 0 0 3 3h2v-8H5v-1a7 7 0 0 1 14 0v1h-3v8h2a3 3 0 0 0 3-3v-6a9 9 0 0 0-9-9z"/><line class="slash" x1="4" y1="3" x2="20" y2="21"/></svg>
+        </button>
+        <button id="btn-settings" class="icon-btn" data-action="settings" title="Configurações"></button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div id="main-header" class="main-header"></div>
+      <div id="home-view" class="view"></div>
+      <div id="wait-view" class="view"></div>
+      <div id="text-view" class="view">
+        <div id="chat-log" class="chat-log"></div>
+        <form id="chat-form" class="chat-form">
+          <div id="attach-preview" class="attach-preview hidden"></div>
+          <div class="chat-box">
+            <button type="button" id="btn-attach" class="attach-btn" title="Enviar imagem (ou cole com Ctrl+V / arraste aqui)">＋</button>
+            <input id="chat-input" maxlength="2000" autocomplete="off" />
+            <input type="file" id="attach-file" accept="image/*" class="hidden">
+          </div>
+        </form>
+      </div>
+      <div id="voice-view" class="view">
+        <div id="voice-join" class="voice-join hidden"></div>
+        <div id="tiles" class="tiles"></div>
+        <div id="voice-people" class="voice-people"></div>
+        <div id="voice-controls" class="voice-controls">
+          <button class="round" data-action="mute" id="vc-mute" title="Microfone"></button>
+          <button class="round" data-action="share" id="vc-share" title="Compartilhar tela"></button>
+          <button class="round yt-round" data-action="yt" id="vc-yt" title="Assistir YouTube junto">▶</button>
+          <button class="round danger" data-action="disconnect" id="vc-hangup" title="Desconectar"></button>
+        </div>
+      </div>
+    </main>
+
+    <aside id="members" class="members"></aside>
+  </div>
+
+  <div id="modal" class="modal hidden"></div>
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="../node_modules/peerjs/dist/peerjs.min.js"></script>
+  <script src="web-version.js"></script>
+  <script src="util.js"></script>
+  <script src="perms.js"></script>
+  <script src="attachments.js"></script>
+  <script src="session.js"></script>
+  <script src="media.js"></script>
+  <script src="watch.js"></script>
+  <script src="app.js"></script>
+  <script src="server-settings.js"></script>
+  <script src="update.js"></script>
+</body>
+</html>
