@@ -29,29 +29,4 @@
     else if (['home', 'goto-voice', 'create-server', 'join-server', 'add-server', 'settings', 'account', 'server-settings'].includes(act)) setTimeout(close, 0);
     else if (act === 'profile' && body.classList.contains('members-open')) setTimeout(close, 0);
   });
-
-  // segurar o dedo no nome da pessoa = botão direito (menu de volumes)
-  let timer = null, startX = 0, startY = 0, fired = false;
-  document.addEventListener('touchstart', (e) => {
-    const el = e.target.closest('[data-speak]');
-    fired = false;
-    if (!el || e.touches.length !== 1) return;
-    const t = e.touches[0];
-    startX = t.clientX; startY = t.clientY;
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      fired = true;
-      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: startX, clientY: startY }));
-    }, 500);
-  }, { passive: true });
-  document.addEventListener('touchmove', (e) => {
-    const t = e.touches[0];
-    if (timer && t && Math.hypot(t.clientX - startX, t.clientY - startY) > 10) { clearTimeout(timer); timer = null; }
-  }, { passive: true });
-  document.addEventListener('touchend', (e) => {
-    clearTimeout(timer); timer = null;
-    if (fired) { e.preventDefault(); fired = false; } // não abre o perfil nem fecha o menu ao soltar
-  });
-  // Android também dispara o contextmenu nativo no toque longo — evita abrir duas vezes
-  document.addEventListener('contextmenu', (e) => { if (e.isTrusted && fired) e.stopImmediatePropagation(); }, true);
 })();
