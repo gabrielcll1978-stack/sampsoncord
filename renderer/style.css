@@ -507,3 +507,22 @@ kbd { background: var(--bg-rail); border: 1px solid var(--bg4); border-bottom-wi
 .yt-badge { background: #ff0033; color: #fff; font-size: 9px; font-weight: 700; width: 20px; height: 14px; border-radius: 4px;
   display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .share-opts { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+
+/* menu do botão direito numa pessoa */
+.user-menu { position: fixed; z-index: 30; width: 260px; background: var(--bg-float); border-radius: 10px; padding: 10px;
+  box-shadow: 0 10px 30px #000a; border: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.um-head { display: flex; align-items: center; gap: 8px; padding-bottom: 4px; }
+.um-label { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 4px; }
+.um-val { color: var(--text); }
+.um-slider { display: flex; align-items: center; gap: 6px; }
+.um-slider input { flex: 1; accent-color: var(--accent); padding: 0; border: 0; background: transparent; }
+.um-slider .tb-btn { background: var(--bg3); color: var(--text); width: 30px; height: 30px; }
+.um-slider .tb-btn .ico { width: 18px; height: 18px; }
+.um-note { line-height: 1.35; }
+.um-item { background: transparent; text-align: left; padding: 7px 8px; }
+.um-item:hover { background: var(--accent); color: #fff; filter: none; }
+
+/* lista de membros simples: nome + atividade */
+.member .msub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.member .msub.act { color: var(--green); font-weight: 600; }
+.pc-activity { color: var(--green); font-weight: 600; font-size: 14px; }

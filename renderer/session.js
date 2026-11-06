@@ -323,6 +323,7 @@ class ServerSession {
       name: user.name, muted, deaf,
       vc: inVoice ? voice.cid : null,
       sharing: inVoice && screenStream ? shareInfo : null,
+      act: settings.showActivity && myActivity ? myActivity : null, // o que estou jogando/usando
     };
   }
   helloMsg() {
@@ -350,6 +351,7 @@ class ServerSession {
     m.name = cleanName(d.name, 24) || m.name || 'Anônimo';
     if (m.uid && prevName && prevName !== m.name) cacheProfile(m.uid, m.name, m.profile || {});
     m.muted = !!d.muted; m.deaf = !!d.deaf;
+    m.activity = cleanActivity(d.act);
     m.vc = typeof d.vc === 'string' ? d.vc : null;
     m.sharing = typeof d.sharing === 'string' ? d.sharing.slice(0, 32) : null;
     if (voice.code === this.code && voice.cid) {
