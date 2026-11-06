@@ -342,7 +342,7 @@ function renderMain() {
     $('#chat-input').placeholder = `Conversar em #${c.name}`;
     showView('text-view');
     renderChat(true);
-    $('#chat-input').focus();
+    if (!matchMedia('(max-width: 800px)').matches) $('#chat-input').focus(); // no celular não abre o teclado sozinho
   } else {
     $('#main-header').innerHTML = `<span class="ch-ico">${ICON.speaker}</span><span>${esc(c.name)}</span>`;
     showView('voice-view');
