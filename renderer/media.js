@@ -411,8 +411,7 @@ function sendScreenTo(s, m) {
       if (!p.encodings || !p.encodings.length) p.encodings = [{}];
       p.encodings[0].maxBitrate = bitrateFor(st.width || 1920, st.height || 1080, fps);
       p.encodings[0].maxFramerate = fps;
-      // jogo (30+ FPS): sob carga é melhor baixar um pouco a resolução do que deixar o vídeo quase parado
-      p.degradationPreference = fps >= 60 ? 'maintain-framerate' : fps >= 30 ? 'balanced' : 'maintain-resolution';
+      p.degradationPreference = fps >= 60 ? 'maintain-framerate' : 'maintain-resolution';
       sender.setParameters(p).catch((e) => console.warn('setParameters', e));
     }
   };
@@ -507,7 +506,7 @@ async function startShare(sourceId, resKey, fps, audio, bitrate = 'auto') {
   }
   const vt = screenStream.getVideoTracks()[0];
   if (vt) {
-    vt.contentHint = fps >= 30 ? 'motion' : 'detail';
+    vt.contentHint = fps >= 60 ? 'motion' : 'detail';
     vt.onended = () => stopShare();
     try { await vt.applyConstraints(video); } catch { }
     const st = vt.getSettings();
