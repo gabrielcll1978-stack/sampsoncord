@@ -3,6 +3,10 @@
 // Só dá pra estar em um canal de voz por vez (em qualquer servidor).
 const voice = { code: null, cid: null };
 let localStream = null, screenStream = null, shareInfo = null;
+let camStream = null; // minha câmera (quando ligada)
+// Versões antigas confundiriam a chamada da câmera com a de voz: só mando câmera pra quem tem 1.6.7+
+const CAM_MIN_VERSION = '1.6.7';
+const canGetCam = (m) => !!m.version && cmpVersion(m.version, CAM_MIN_VERSION) >= 0;
 let muted = false, deaf = false, mutedBeforeDeaf = false;
 let stopLocalMeter = null;
 const speaking = new Set();
@@ -86,6 +90,7 @@ function leaveVoice(quiet) {
   const s = voiceSession();
   if (!s) return;
   stopShare(true);
+  stopCam(true);
   watchTogether.stop();
   voice.code = null;
   voice.cid = null;
@@ -107,6 +112,7 @@ function reconcile(s) {
         bindVoice(s, m, s.me.call(m.id, localStream, { metadata: { kind: 'voice', cid: voice.cid } }));
       }
       if (screenStream && !m.screenOut && !m.noWatch) sendScreenTo(s, m);
+      if (camStream && !m.camOut && canGetCam(m)) sendCamTo(s, m);
     } else {
       dropMedia(m);
     }
@@ -115,7 +121,7 @@ function reconcile(s) {
 }
 
 function dropMedia(m) {
-  for (const k of ['voice', 'screenOut', 'screenIn']) {
+  for (const k of ['voice', 'screenOut', 'screenIn', 'camOut', 'camIn']) {
     const c = m[k];
     m[k] = null;
     try { c && c.close(); } catch { }
@@ -124,6 +130,7 @@ function dropMedia(m) {
   m.audio.srcObject = null;
   setSpeaking(m.id, false);
   removeTile(m.id);
+  removeTile('cam:' + m.id);
 }
 
 function bindVoice(s, m, call) {
@@ -160,6 +167,14 @@ function onCall(s, call) {
     call.answer();
     call.on('stream', (stream) => { if (m.screenIn === call) addTile(m.id, stream, false); });
     call.on('close', () => { if (m.screenIn === call) { m.screenIn = null; removeTile(m.id); } });
+    return;
+  }
+  if (meta.kind === 'cam') {
+    if (m.camIn) { const old = m.camIn; m.camIn = null; old.close(); }
+    m.camIn = call;
+    call.answer();
+    call.on('stream', (stream) => { if (m.camIn === call) addTile('cam:' + m.id, stream, false); });
+    call.on('close', () => { if (m.camIn === call) { m.camIn = null; removeTile('cam:' + m.id); } });
     return;
   }
   if (m.voice) { const old = m.voice; m.voice = null; old.close(); }
@@ -202,7 +217,12 @@ function setMemberVolume(m, kind, vol) {
 let pendingFocus = null; // tela que o usuário pediu pra assistir e ainda está chegando
 
 function tileLabel(id) {
-  if (id === 'me') return `Sua tela · ${shareInfo || ''}${shareEncoderInfo ? ' · ' + shareEncoderInfo : ''}`;
+  if (id === 'cam:me') return 'Sua câmera';
+  if (id.startsWith('cam:')) {
+    const s = voiceSession(), m = s && s.members.get(id.slice(4));
+    return m ? m.name : 'Câmera';
+  }
+  if (id === 'me')return `Sua tela · ${shareInfo || ''}${shareEncoderInfo ? ' · ' + shareEncoderInfo : ''}`;
   const s = voiceSession();
   const m = s && s.members.get(id);
   return m ? `${m.name}${m.sharing ? ' · ' + m.sharing : ''}` : 'Tela';
@@ -251,12 +271,19 @@ function toggleFullscreen(tile) {
 
 function addTile(id, stream, isLocal) {
   let tile = $(`.tile[data-id="${id}"]`);
+  const isCam = id.startsWith('cam:');
   if (!tile) {
     const s = voiceSession(), m = !isLocal && s && s.members.get(id);
     tile = document.createElement('div');
-    tile.className = 'tile';
+    tile.className = 'tile' + (isCam ? ' cam-tile' : '');
     tile.dataset.id = id;
-    tile.innerHTML = `<video autoplay playsinline></video>
+    tile.innerHTML = isCam ? `<video autoplay playsinline muted class="${isLocal ? 'mirror' : ''}"></video>
+      <div class="tile-top"><span class="cam-pill">📷</span><span class="lbl"></span></div>
+      <div class="tile-bar">
+        <span class="tb-space"></span>
+        <button class="tb-btn" data-tile="focus"></button>
+        <button class="tb-btn" data-tile="full" title="Tela cheia (duplo clique)">${ICON.fullscreen}</button>
+      </div>` : `<video autoplay playsinline></video>
       <div class="tile-top"><span class="live-pill">AO VIVO</span><span class="lbl"></span></div>
       <div class="tile-bar">
         ${isLocal ? '<span class="tb-hint">Prévia da sua tela</span>' : `
@@ -295,9 +322,9 @@ function addTile(id, stream, isLocal) {
   }
   tile.querySelector('.lbl').textContent = tileLabel(id);
   const v = tile.querySelector('video');
-  v.muted = isLocal || deaf;
-  v.dataset.local = isLocal ? '1' : '';
-  if (!isLocal) {
+  v.muted = isLocal || isCam || deaf; // câmera não tem som (a voz já vem pela chamada)
+  v.dataset.local = isLocal || isCam ? '1' : '';
+  if (!isLocal && !isCam) {
     const s = voiceSession(), m = s && s.members.get(id);
     if (m) v.volume = m.screenVolume;
     applyOutput(v);
@@ -543,4 +570,66 @@ function stopShare(quiet) {
     if (!quiet) s.sendState();
   }
   removeTile('me');
+}
+
+// ---------------------------------------------------------------- câmera
+// Funciona no app, no navegador do PC e no celular (câmera da frente). Vai pra todos da chamada.
+const CAM_BITRATE = 1.5e6; // câmera não precisa de muito: economiza a internet de quem manda
+
+async function toggleCamera() {
+  if (camStream) { stopCam(); ui.refresh(); return; }
+  const s = voiceSession();
+  if (!s) return toast('Entre num canal de voz para ligar a câmera.');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return toast('Este navegador não deixa usar a câmera.');
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
+    });
+  } catch (e) {
+    if (e && e.name === 'NotAllowedError') return toast('Sem permissão para usar a câmera. Libere a câmera para o Sampsoncord e tente de novo.');
+    if (e && e.name === 'NotFoundError') return toast('Nenhuma câmera encontrada.');
+    if (e && e.name === 'NotReadableError') return toast('A câmera está sendo usada por outro programa.');
+    return toast('Não foi possível ligar a câmera: ' + ((e && e.message) || e));
+  }
+  if (voiceSession() !== s) { stream.getTracks().forEach((t) => t.stop()); return; } // saiu do canal enquanto abria
+  camStream = stream;
+  const vt = camStream.getVideoTracks()[0];
+  if (vt) { vt.contentHint = 'motion'; vt.onended = () => { stopCam(); ui.refresh(); }; } // ex.: celular bloqueou a tela
+  addTile('cam:me', camStream, true);
+  s.sendState();
+  reconcile(s);
+}
+
+function sendCamTo(s, m) {
+  const call = s.me.call(m.id, camStream, { metadata: { kind: 'cam', cid: voice.cid } });
+  m.camOut = call;
+  call.on('close', () => { if (m.camOut === call) m.camOut = null; });
+  const pc = call.peerConnection;
+  if (!pc) return;
+  pc.addEventListener('connectionstatechange', () => {
+    if (pc.connectionState !== 'connected') return;
+    for (const sender of pc.getSenders()) {
+      if (!sender.track || sender.track.kind !== 'video') continue;
+      const p = sender.getParameters();
+      if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+      p.encodings[0].maxBitrate = CAM_BITRATE;
+      p.encodings[0].maxFramerate = 30;
+      sender.setParameters(p).catch(() => { });
+    }
+  });
+}
+
+function stopCam(quiet) {
+  if (!camStream) return;
+  camStream.getTracks().forEach((t) => t.stop());
+  camStream = null;
+  const s = voiceSession();
+  if (s) {
+    for (const m of s.members.values()) if (m.camOut) { const c = m.camOut; m.camOut = null; c.close(); }
+    s.broadcast({ t: 'cam-stop' });
+    if (!quiet) s.sendState();
+  }
+  removeTile('cam:me');
 }

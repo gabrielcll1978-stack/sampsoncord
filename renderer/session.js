@@ -296,7 +296,7 @@ class ServerSession {
   addMember(id) {
     const m = {
       id, uid: '', name: '', named: false, muted: false, deaf: false, vc: null, sharing: null, profile: {},
-      conn: null, voice: null, screenIn: null, screenOut: null,
+      conn: null, voice: null, screenIn: null, screenOut: null, cam: false, camIn: null, camOut: null,
       audio: new Audio(), volume: 1, screenVolume: 1, stopMeter: null,
     };
     m.audio.autoplay = true;
@@ -323,6 +323,7 @@ class ServerSession {
       name: user.name, muted, deaf,
       vc: inVoice ? voice.cid : null,
       sharing: inVoice && screenStream ? shareInfo : null,
+      cam: !!(inVoice && camStream), // câmera ligada (versões antigas ignoram)
     };
   }
   helloMsg() {
@@ -358,6 +359,8 @@ class ServerSession {
     }
     if (!m.sharing && m.screenIn) { const c = m.screenIn; m.screenIn = null; c.close(); removeTile(m.id); }
     if (!m.sharing) m.unwatched = false; // próxima vez que compartilhar, volta a aparecer
+    m.cam = !!d.cam;
+    if (!m.cam && m.camIn) { const c = m.camIn; m.camIn = null; c.close(); removeTile('cam:' + m.id); }
     if (m.sharing && !wasSharing && m.named && m.vc && voice.code === this.code && voice.cid === m.vc) ui.onShareStarted(this, m);
   }
 
@@ -421,6 +424,10 @@ class ServerSession {
       case 'watch':
         m.noWatch = false;
         reconcile(this);
+        break;
+      case 'cam-stop':
+        if (m.camIn) { const c = m.camIn; m.camIn = null; c.close(); }
+        removeTile('cam:' + id);
         break;
       case 'screen-stop':
         if (m.screenIn) { const c = m.screenIn; m.screenIn = null; c.close(); }

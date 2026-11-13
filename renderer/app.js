@@ -95,7 +95,7 @@ function ytBadge(p) {
 }
 const badges = (p, s) => ytBadge(p) + (p.sharing
   ? `<span class="live-pill${s ? ' watch' : ''}"${s ? ` data-action="watch" data-code="${s.code}" data-id="${esc(p.id)}" title="Assistir a tela"` : ''}>${s ? '▶ ' : ''}AO VIVO</span>`
-  : '') + (p.deaf ? ICON_DEAF : p.muted ? ICON_MIC_OFF : '');
+  : '') + (p.cam ? '<span class="cam-badge" title="Câmera ligada">📷</span>' : '') + (p.deaf ? ICON_DEAF : p.muted ? ICON_MIC_OFF : '');
 
 // Sliders de volume de uma pessoa (voz e, se estiver compartilhando, som da tela)
 function volumeSliders(m) {
@@ -125,7 +125,7 @@ function setView(s, view) {
 function voiceParticipants(s, cid) {
   const list = [];
   if (voice.code === s.code && voice.cid === cid) {
-    list.push({ id: 'me', uid: user.id, name: user.name, muted, deaf, sharing: screenStream ? shareInfo : null, me: true });
+    list.push({ id: 'me', uid: user.id, name: user.name, muted, deaf, sharing: screenStream ? shareInfo : null, cam: !!camStream, me: true });
   }
   for (const m of s.members.values()) if (m.named && m.vc === cid) list.push(m);
   return list;
@@ -453,6 +453,9 @@ function renderVoiceView() {
   $('#vc-yt').classList.toggle('pending', watchTogether.hidden);
   $('#vc-yt').title = watchTogether.hidden ? 'Voltar ao vídeo (os outros estão assistindo)' : 'Assistir YouTube junto';
   $('#vc-share').title = screenStream ? 'Parar de compartilhar' : 'Compartilhar tela';
+  $('#vc-cam').innerHTML = camStream ? ICON.cam : ICON.camOff;
+  $('#vc-cam').classList.toggle('on-live', !!camStream);
+  $('#vc-cam').title = camStream ? 'Desligar câmera' : 'Ligar câmera';
   $$('#tiles .tile').forEach((t) => { if (t.dataset.id !== 'yt') t.querySelector('.lbl').textContent = tileLabel(t.dataset.id); });
 }
 
@@ -614,6 +617,7 @@ const actions = {
   mute: () => { if (deaf) setDeaf(false); else setMuted(!muted); },
   deaf: () => setDeaf(!deaf),
   share: () => (screenStream ? (stopShare(), ui.refresh()) : openSharePicker()),
+  cam: () => toggleCamera(),
   disconnect: () => leaveVoice(),
   account: () => openAccountModal(),
   settings: () => openSettingsModal(),
