@@ -416,6 +416,13 @@ function sendScreenTo(s, m) {
     }
   };
   pc.addEventListener('connectionstatechange', tune);
+  // a tela chegou nessa pessoa = ela começou a assistir: toca o "plop" de bolha (uma vez por conexão)
+  let popped = false;
+  pc.addEventListener('connectionstatechange', () => {
+    if (popped || pc.connectionState !== 'connected' || m.screenOut !== call || !screenStream) return;
+    popped = true;
+    soundBubble();
+  });
 }
 
 async function openSharePicker() {

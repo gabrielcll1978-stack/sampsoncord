@@ -191,6 +191,38 @@ const soundJoin = () => beep([520, 780]);
 const soundLeave = () => beep([780, 520]);
 const soundMsg = () => beep([880]);
 
+// "Plop" de bolha estourando: alguém começou a receber/assistir minha tela.
+// Se várias pessoas entram juntas, os plops saem em sequência (não um por cima do outro).
+let nextBubbleAt = 0;
+function soundBubble() {
+  if (!settings.sounds) return;
+  try {
+    const ctx = audioCtx();
+    const t = Math.max(ctx.currentTime + 0.01, nextBubbleAt);
+    nextBubbleAt = t + 0.14;
+    // bolha: tom que sobe rápido e some (o "blop")
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(380, t);
+    o.frequency.exponentialRampToValueAtTime(1400, t + 0.07);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.22, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+    o.connect(g).connect(ctx.destination);
+    o.start(t); o.stop(t + 0.1);
+    // estalinho do estouro (ruído bem curto)
+    const len = Math.floor(ctx.sampleRate * 0.015);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const n = ctx.createBufferSource(), ng = ctx.createGain(), hp = ctx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 2000;
+    n.buffer = buf; ng.gain.value = 0.12;
+    n.connect(hp).connect(ng).connect(ctx.destination);
+    n.start(t + 0.055);
+  } catch { }
+}
+
 // Anúncio falado de quem entra/sai do canal de voz ("Gabriel entrou"). Sem voz disponível, toca o bipe.
 let ptVoice = null;
 function pickVoice() {
