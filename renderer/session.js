@@ -76,7 +76,14 @@ function cleanMsg(m) {
   if (m.att && typeof m.att.id === 'string' && /^[a-z0-9]{6,24}$/.test(m.att.id)) {
     att = { id: m.att.id, w: Math.min(4000, +m.att.w || 0), h: Math.min(4000, +m.att.h || 0) };
   }
-  if (!text.trim() && !att) return null;
+  // arquivo: só o "cartão" (nome, tamanho, tipo); o conteúdo vem direto de quem tem, quando a pessoa clica em Baixar
+  let file = null;
+  if (m.file && typeof m.file.id === 'string' && /^[a-z0-9]{6,24}$/.test(m.file.id) && typeof m.file.name === 'string') {
+    const name = m.file.name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim().slice(0, 120) || 'arquivo';
+    const size = Math.max(0, Math.floor(+m.file.size || 0));
+    if (Number.isFinite(size)) file = { id: m.file.id, name, size, type: String(m.file.type || '').slice(0, 80) };
+  }
+  if (!text.trim() && !att && !file) return null;
   const out = {
     id: m.id, text,
     ts: Math.min(+m.ts || 0, Date.now() + 60000),
@@ -84,6 +91,7 @@ function cleanMsg(m) {
     uid: String(m.uid || '').slice(0, 32),
   };
   if (att) out.att = att;
+  if (file) out.file = file;
   return out;
 }
 
@@ -309,6 +317,7 @@ class ServerSession {
     if (!m) return;
     this.members.delete(id);
     dropMedia(m);
+    files.onPeerGone(m);
     try { m.conn && m.conn.close(); } catch { }
     if (voice.code === this.code && voice.cid && m.vc === voice.cid && m.named) announceVoice(m.name, false);
     // Se quem saiu era o porteiro, alguém precisa assumir
@@ -398,6 +407,12 @@ class ServerSession {
       case 'att':
         attachments.receive(d.id, d.data);
         break;
+      // arquivos do chat: quem tem? / eu tenho / me manda / pedaço / cancela
+      case 'file-ask': files.onAsk(m, d.id); break;
+      case 'file-have': files.onHave(m, d.id); break;
+      case 'file-get': files.onGet(m, d.id); break;
+      case 'file-chunk': files.onChunk(m, d); break;
+      case 'file-cancel': files.onCancel(m, d.id); break;
       case 'yt': // assistir YouTube junto no canal de voz
         watchTogether.onMessage(this, m, d);
         break;
@@ -501,9 +516,11 @@ class ServerSession {
   canDeleteMsg(msg) { return !msg.deleted && (msg.uid === user.id || can(this.state, user.id, 'admin')); }
 
   // att: { id, w, h } de uma imagem já guardada em attachments
-  sendMsg(cid, text, att) {
+  // file: { id, name, size, type } de um arquivo já guardado em files
+  sendMsg(cid, text, att, file) {
     const m = { id: rand(12), text: String(text || '').slice(0, 2000), ts: Date.now(), author: user.name, uid: user.id };
     if (att) m.att = att;
+    if (file) m.file = file;
     this.addMsgs(cid, [m]);
     // canal restrito: só manda pra quem tem acesso
     for (const mm of this.members.values()) {

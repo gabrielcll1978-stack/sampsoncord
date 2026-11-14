@@ -68,7 +68,7 @@ function notifyMessage(s, cid) {
   const pr = profileOf(m.uid);
   try {
     const n = new Notification(`${m.author} (#${c.name} · ${s.name})`, {
-      body: m.att ? ('📷 Imagem' + (m.text && m.text !== IMG_PLACEHOLDER ? ': ' + m.text.slice(0, 180) : '')) : m.text.slice(0, 200), icon: (pr && pr.avatar) || '../build/icon.png', silent: true,
+      body: m.file ? ('📎 ' + m.file.name + ' (' + fmtSize(m.file.size) + ')') : m.att ? ('📷 Imagem' + (m.text && m.text !== IMG_PLACEHOLDER ? ': ' + m.text.slice(0, 180) : '')) : m.text.slice(0, 200), icon: (pr && pr.avatar) || '../build/icon.png', silent: true,
     });
     n.onclick = () => {
       if (window.desktop && window.desktop.focusWindow) window.desktop.focusWindow();
@@ -395,6 +395,7 @@ function renderChat(forceBottom) {
   log.innerHTML = html;
   if (atBottom) log.scrollTop = log.scrollHeight;
   attachments.hydrate(log);
+  files.hydrate(log);
   hydratePreviews(log).then(() => { if (atBottom) log.scrollTop = log.scrollHeight; });
   // imagens que carregam depois mudam a altura: mantém no fim se já estava no fim
   $$('img', log).forEach((img) => img.addEventListener('load', () => { if (atBottom) log.scrollTop = log.scrollHeight; }, { once: true }));
@@ -403,8 +404,9 @@ function renderChat(forceBottom) {
 // Corpo de uma mensagem: texto com links, imagem anexada e prévia do primeiro link
 function msgContent(m) {
   let out = '';
-  const text = m.att && m.text === IMG_PLACEHOLDER ? '' : m.text;
+  const text = (m.att && m.text === IMG_PLACEHOLDER) || (m.file && isFilePlaceholder(m.text)) ? '' : m.text;
   if (text) out += `<div class="text">${linkify(text)}</div>`;
+  if (m.file) out += files.cardHTML(m.file);
   if (m.att) {
     const ratio = m.att.w && m.att.h ? `style="aspect-ratio:${m.att.w}/${m.att.h}"` : '';
     out += `<img class="chat-img loading" data-att="${esc(m.att.id)}" ${ratio} alt="imagem">`;
@@ -591,7 +593,7 @@ const actions = {
     if (!s || v.type !== 'text') return;
     const msg = s.msgs(v.cid).find((m) => m.id === el.dataset.mid);
     if (!msg || !s.canDeleteMsg(msg)) return;
-    const preview = msg.att && msg.text === IMG_PLACEHOLDER ? '📷 imagem' : msg.text.slice(0, 80);
+    const preview = msg.file ? '📎 ' + msg.file.name : msg.att && msg.text === IMG_PLACEHOLDER ? '📷 imagem' : msg.text.slice(0, 80);
     if (!confirm(`Apagar esta mensagem para todos?\n\n"${preview}"`)) return;
     s.deleteMsg(v.cid, msg.id);
     renderChat();
@@ -698,11 +700,34 @@ document.addEventListener('input', (e) => {
   if (m) setMemberVolume(m, e.target.dataset.kind === 'screen' ? 'screen' : 'voice', e.target.value / 100);
 });
 
-// ---------------------------------------------------------------- enviar mensagem (texto + imagem)
+// ---------------------------------------------------------------- enviar mensagem (texto + imagem + arquivo)
 let pendingImage = null; // { data, w, h } esperando o "enviar"
+let pendingFile = null;  // { blob, name, preview? } arquivo (de qualquer tamanho) esperando o "enviar"
+
+// Arquivo qualquer: imagem vai pelo caminho de imagem (aparece no chat); o resto vira cartão de arquivo
+function pickFile(file) {
+  if (!file) return;
+  if (/^image\/(jpeg|png|webp|gif|bmp)$/.test(file.type)) return setPendingImage(file);
+  setPendingFile(file, file.name || 'arquivo');
+}
+function setPendingFile(blob, name, preview) {
+  clearPendingImage();
+  pendingFile = { blob, name, preview };
+  $('#attach-preview').innerHTML = `<span class="fc-ico">${fileIcon(name, blob.type)}</span><span><b>${esc(name)}</b> · ${fmtSize(blob.size)}${preview ? ' · texto grande vira arquivo .txt' : ''}<br>Aperte Enter para enviar</span><button type="button" class="ghost sm" id="attach-cancel">✕</button>`;
+  $('#attach-preview').classList.remove('hidden');
+  $('#attach-cancel').onclick = clearPendingImage;
+  $('#chat-input').focus();
+}
+// Texto grande demais pra uma mensagem: vira um .txt (com as quebras de linha certinhas)
+function textAsFile(text) {
+  const d = new Date(), p = (n) => String(n).padStart(2, '0');
+  const name = `texto-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.txt`;
+  setPendingFile(new Blob([text], { type: 'text/plain;charset=utf-8' }), name, text.slice(0, 280).replace(/\s+/g, ' ').trim());
+}
 
 async function setPendingImage(file) {
   try {
+    pendingFile = null;
     pendingImage = await attachments.prepare(file);
     $('#attach-preview').innerHTML = `<img src="${pendingImage.data}" alt=""><span>Imagem pronta: aperte Enter para enviar</span><button type="button" class="ghost sm" id="attach-cancel">✕</button>`;
     $('#attach-preview').classList.remove('hidden');
@@ -712,6 +737,7 @@ async function setPendingImage(file) {
 }
 function clearPendingImage() {
   pendingImage = null;
+  pendingFile = null;
   $('#attach-preview').classList.add('hidden');
   $('#attach-preview').innerHTML = '';
 }
@@ -719,34 +745,45 @@ function clearPendingImage() {
 $('#chat-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const s = activeSession();
-  const text = $('#chat-input').value.trim();
-  if (!s || (!text && !pendingImage)) return;
+  let text = $('#chat-input').value.trim();
+  if (!s || (!text && !pendingImage && !pendingFile)) return;
   const v = viewOf(s);
   if (v.type !== 'text') return;
+  // digitou um texto grande demais: vira .txt
+  if (text.length > BIG_TEXT && !pendingFile && !pendingImage) { textAsFile(text); $('#chat-input').value = ''; text = ''; }
   $('#chat-input').value = '';
-  let att = null;
+  let att = null, file = null;
   if (pendingImage) {
     att = { id: rand(14), w: pendingImage.w, h: pendingImage.h };
     await attachments.put(att.id, pendingImage.data);
-    clearPendingImage();
   }
-  s.sendMsg(v.cid, text || (att ? IMG_PLACEHOLDER : ''), att);
+  if (pendingFile) {
+    const pf = pendingFile;
+    file = { id: rand(14), name: pf.name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 120), size: pf.blob.size, type: pf.blob.type || '' };
+    await files.put(file.id, pf.blob);
+    if (!text && pf.preview) text = pf.preview.length >= 280 ? pf.preview + '…' : pf.preview;
+  }
+  clearPendingImage();
+  s.sendMsg(v.cid, text || (att ? IMG_PLACEHOLDER : file ? FILE_PLACEHOLDER(file.name) : ''), att, file);
   renderChat(true);
 });
 $('#btn-attach').addEventListener('click', () => $('#attach-file').click());
-$('#attach-file').addEventListener('change', (e) => { if (e.target.files[0]) setPendingImage(e.target.files[0]); e.target.value = ''; });
-// Ctrl+V com imagem copiada
+$('#attach-file').addEventListener('change', (e) => { if (e.target.files[0]) pickFile(e.target.files[0]); e.target.value = ''; });
+// Ctrl+V: imagem/arquivo copiado, ou texto grande (vira .txt com as quebras de linha)
 $('#chat-input').addEventListener('paste', (e) => {
-  const item = [...(e.clipboardData || {}).items || []].find((i) => i.type.startsWith('image/'));
-  if (item) { e.preventDefault(); setPendingImage(item.getAsFile()); }
+  const cd = e.clipboardData || {};
+  const item = [...cd.items || []].find((i) => i.kind === 'file');
+  if (item) { e.preventDefault(); pickFile(item.getAsFile()); return; }
+  const t = cd.getData ? cd.getData('text') : '';
+  if (t && t.length > BIG_TEXT) { e.preventDefault(); textAsFile(t); }
 });
 // arrastar e soltar imagem no chat
 $('#text-view').addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); $('#text-view').classList.add('dropping'); } });
 $('#text-view').addEventListener('dragleave', (e) => { if (!e.relatedTarget || !$('#text-view').contains(e.relatedTarget)) $('#text-view').classList.remove('dropping'); });
 $('#text-view').addEventListener('drop', (e) => {
   e.preventDefault(); $('#text-view').classList.remove('dropping');
-  const f = [...e.dataTransfer.files].find((x) => x.type.startsWith('image/'));
-  if (f) setPendingImage(f); else toast('Por enquanto só dá para enviar imagens.');
+  const f = e.dataTransfer.files[0];
+  if (f) pickFile(f);
 });
 
 window.addEventListener('beforeunload', () => { for (const s of sessions.values()) s.destroy(); });
