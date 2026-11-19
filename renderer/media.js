@@ -135,8 +135,30 @@ function dropMedia(m) {
 
 function bindVoice(s, m, call) {
   m.voice = call;
+  let gotStream = false, badSince = 0;
+  // Chamada que nunca conectou ou travou (o outro lado recusou, a rede piscou): antes ficava
+  // "pendurada" pra sempre e ninguém se ouvia até reabrir o app. Agora derruba e liga de novo.
+  const kill = () => {
+    clearInterval(watch);
+    if (m.voice !== call) return;
+    m.voice = null;
+    m.audio.srcObject = null;
+    if (m.stopMeter) { m.stopMeter(); m.stopMeter = null; }
+    try { call.close(); } catch { }
+    setTimeout(() => reconcile(s), 1000);
+  };
+  const started = Date.now();
+  const watch = setInterval(() => {
+    if (m.voice !== call) return clearInterval(watch);
+    const st = call.peerConnection && call.peerConnection.connectionState;
+    if (!gotStream && Date.now() - started > 12000) return kill();
+    if (st === 'failed' || st === 'closed') return kill();
+    if (st === 'disconnected') { badSince = badSince || Date.now(); if (Date.now() - badSince > 8000) kill(); }
+    else badSince = 0;
+  }, 2000);
   call.on('stream', (stream) => {
     if (m.voice !== call) return;
+    gotStream = true;
     m.audio.srcObject = stream;
     m.audio.muted = deaf;
     m.audio.volume = m.volume; // volume da voz (separado do som da tela)
@@ -146,6 +168,7 @@ function bindVoice(s, m, call) {
     m.stopMeter = watchSpeaking(stream, (sp) => setSpeaking(m.id, sp));
   });
   call.on('close', () => {
+    clearInterval(watch);
     if (m.voice !== call) return;
     m.voice = null;
     m.audio.srcObject = null;
@@ -156,9 +179,15 @@ function bindVoice(s, m, call) {
   call.on('error', (e) => console.warn('call error', e));
 }
 
-function onCall(s, call) {
+function onCall(s, call, tries = 0) {
   const meta = call.metadata || {};
   const m = s.members.get(call.peer);
+  // A chamada às vezes chega antes da conexão de dados abrir do meu lado (comum com quem está
+  // na web): antes era recusada e a voz não vinha. Agora espera a pessoa aparecer (até ~6s).
+  if ((!m || !m.named) && tries < 20 && voice.code === s.code && meta.cid === voice.cid) {
+    setTimeout(() => onCall(s, call, tries + 1), 300);
+    return;
+  }
   if (!m || voice.code !== s.code || meta.cid !== voice.cid) { call.close(); return; }
   if (meta.kind === 'screen') {
     if (m.unwatched) { call.close(); return; } // parei de assistir essa pessoa

@@ -15,6 +15,14 @@
 const sessions = new Map(); // código -> ServerSession
 const PROTO = 3; // 1 = salas por nome (primeiro .exe), 2 = servidores com código, 3 = + versão/assistir
 
+// "Batimento": a cada 5s todo mundo manda um ping. Quem some sem fechar a conexão (celular que
+// dormiu, aba recarregada, internet que caiu) ficava pra sempre na lista como fantasma e duplicava
+// quando voltava com outro ID. Agora, sem sinal por 25s, sai da lista.
+const PING_MIN_VERSION = '1.6.9';
+const PING_EVERY = 5000;
+const PING_TIMEOUT = 25000;
+const canPing = (m) => !!m.version && cmpVersion(m.version, PING_MIN_VERSION) >= 0;
+
 // Compara versões "1.2.10" x "1.3.0": negativo se a < b
 function cmpVersion(a, b) {
   const pa = String(a || '0').split('.').map(Number), pb = String(b || '0').split('.').map(Number);
@@ -260,11 +268,50 @@ class ServerSession {
   // A cada 30s, quem não é porteiro pergunta de novo quem está online. Isso junta grupos que
   // ficaram separados (porteiro caiu, atualização, rede instável) sem ninguém precisar sair e entrar.
   startDiscovery() {
+    if (!this.pingTimer) this.pingTimer = setInterval(() => this.heartbeat(), PING_EVERY);
     if (this.discoveryTimer) return;
     this.discoveryTimer = setInterval(() => {
       if (!this.started || this.closed || this.lobby || !this.me || !this.me.open) return;
       this.askLobby();
     }, 30000);
+  }
+
+  heartbeat() {
+    if (this.closed) return;
+    const now = Date.now();
+    for (const m of [...this.members.values()]) {
+      if (!m.conn || !m.conn.open || !canPing(m)) continue;
+      if (now - m.lastSeen > PING_TIMEOUT) { console.warn(`[${this.code}] sem sinal de ${m.name || m.id}, removendo`); this.removeMember(m.id); continue; }
+      try { m.conn.send({ t: 'ping' }); } catch { }
+    }
+    // rede de segurança da voz: alguém no meu canal sem chamada? liga de novo
+    if (voice.code === this.code && localStream) {
+      for (const m of this.members.values()) {
+        if (inMyChannel(this, m) && m.conn && m.conn.open && !m.voice && this.me.id < m.id) { reconcile(this); break; }
+      }
+    }
+  }
+
+  // A mesma pessoa (mesmo uid) apareceu com outro ID: quase sempre é ela voltando depois de
+  // recarregar a página / o celular acordar, e o ID antigo é um fantasma. Testa o antigo com um
+  // ping; se não responder em 4s, tira da lista.
+  dropStaleTwin(m) {
+    if (!m.uid) return;
+    for (const old of [...this.members.values()]) {
+      if (old === m || old.uid !== m.uid) continue;
+      if (!old.conn || !old.conn.open || !canPing(old)) { this.removeMember(old.id); continue; }
+      const asked = Date.now();
+      try { old.conn.send({ t: 'ping' }); } catch { }
+      setTimeout(() => { if (this.members.get(old.id) === old && old.lastSeen < asked) this.removeMember(old.id); }, 4000);
+    }
+  }
+
+  // A página voltou a ficar visível (celular desbloqueado, aba trazida pra frente): reconecta logo
+  wake() {
+    if (this.closed || !this.me) return;
+    if (this.me.disconnected && !this.me.destroyed) { try { this.me.reconnect(); } catch { } }
+    else if (this.started && !this.lobby) this.askLobby();
+    this.heartbeat();
   }
 
   connectTo(id, retry = true) {
@@ -296,7 +343,11 @@ class ServerSession {
       m.conn = c;
       c.send(this.helloMsg());
     });
-    c.on('data', (d) => { try { this.onData(c.peer, d); } catch (e) { console.warn('data', e); } });
+    c.on('data', (d) => {
+      const m = this.members.get(c.peer);
+      if (m && m.conn === c) m.lastSeen = Date.now();
+      try { this.onData(c.peer, d); } catch (e) { console.warn('data', e); }
+    });
     c.on('close', () => { const m = this.members.get(c.peer); if (m && m.conn === c) this.removeMember(c.peer); });
     c.on('error', (e) => console.warn('conn error', e));
   }
@@ -305,7 +356,7 @@ class ServerSession {
     const m = {
       id, uid: '', name: '', named: false, muted: false, deaf: false, vc: null, sharing: null, profile: {},
       conn: null, voice: null, screenIn: null, screenOut: null, cam: false, camIn: null, camOut: null,
-      audio: new Audio(), volume: 1, screenVolume: 1, stopMeter: null,
+      audio: new Audio(), volume: 1, screenVolume: 1, stopMeter: null, lastSeen: Date.now(),
     };
     m.audio.autoplay = true;
     this.members.set(id, m);
@@ -386,6 +437,7 @@ class ServerSession {
         m.volume = getVol(m.uid, 'voice');
         m.screenVolume = getVol(m.uid, 'screen');
         m.audio.volume = m.volume;
+        this.dropStaleTwin(m);
         this.applyPresence(m, d);
         this.applyProfile(m, d.profile);
         ui.onPeerVersion(this, m); // depois do nome, pra mensagem sair certa
@@ -398,6 +450,10 @@ class ServerSession {
         ui.refresh();
         break;
       }
+      case 'ping':
+        try { m.conn && m.conn.open && m.conn.send({ t: 'pong' }); } catch { }
+        break;
+      case 'pong': break; // só serve pra atualizar o lastSeen
       case 'history':
         this.takeHistory(d.history);
         break;
@@ -535,8 +591,14 @@ class ServerSession {
     this.closed = true;
     this.started = false;
     clearInterval(this.discoveryTimer);
+    clearInterval(this.pingTimer);
     for (const id of [...this.members.keys()]) this.removeMember(id);
     try { this.lobby && this.lobby.destroy(); } catch { }
     try { this.me && this.me.destroy(); } catch { }
   }
 }
+
+// celular desbloqueado / aba trazida pra frente: reconecta e confere quem ainda está aí
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') for (const s of sessions.values()) s.wake();
+});
