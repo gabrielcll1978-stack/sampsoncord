@@ -14,6 +14,58 @@
   } catch (e) { console.error('migração', e); }
 })();
 
+// Backup da conta (só no app): contas, servidores, configurações e perfis ficam também num
+// arquivo à parte. Se o armazenamento do app aparecer vazio (dados corrompidos, Windows desligou no
+// meio de uma gravação...), restaura tudo daqui antes de qualquer coisa ler o localStorage.
+// Mensagens não entram: voltam sozinhas dos amigos ao conectar.
+const BACKUP_SKIP = /^salinha-msgs-/;
+(() => {
+  try {
+    if (!window.desktop || !window.desktop.readBackup) return;
+    let accs = null;
+    try { accs = JSON.parse(localStorage.getItem('salinha-accounts')); } catch { }
+    if (Array.isArray(accs) && accs.length) return; // tem conta: nada a fazer
+    if (localStorage.getItem('salinha-user')) return;  // formato antigo, loadAccounts migra
+    const b = window.desktop.readBackup();
+    if (!b || !b.keys) return;
+    let bAccs = null;
+    try { bAccs = JSON.parse(b.keys['salinha-accounts']); } catch { }
+    if (!Array.isArray(bAccs) || !bAccs.length) return;
+    for (const [k, v] of Object.entries(b.keys)) {
+      if (typeof v === 'string' && localStorage.getItem(k) == null) localStorage.setItem(k, v);
+    }
+    localStorage.setItem('salinha-accounts', b.keys['salinha-accounts']);
+    window.restoredFromBackup = b.ts || true;
+    console.warn('conta restaurada do backup', new Date(b.ts || 0).toISOString());
+  } catch (e) { console.error('restaurar backup', e); }
+})();
+
+let lastBackupJson = '';
+function backupNow(force) {
+  try {
+    if (!window.desktop || !window.desktop.writeBackup) return;
+    const keys = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('salinha-') && !BACKUP_SKIP.test(k)) keys[k] = localStorage.getItem(k);
+    }
+    for (const k of ['last-account']) { const v = localStorage.getItem(k); if (v != null) keys[k] = v; }
+    // nunca troca um backup bom por um vazio, a não ser que a pessoa tenha removido a conta de propósito
+    let accs = null;
+    try { accs = JSON.parse(keys['salinha-accounts']); } catch { }
+    if (!force && !(Array.isArray(accs) && accs.length)) return;
+    const json = JSON.stringify(keys);
+    if (json === lastBackupJson) return;
+    lastBackupJson = json;
+    window.desktop.writeBackup({ ts: Date.now(), keys });
+  } catch (e) { console.warn('backup', e); }
+}
+if (window.desktop) {
+  setTimeout(() => backupNow(), 5000);
+  setInterval(() => backupNow(), 60000);
+  window.addEventListener('beforeunload', () => backupNow());
+}
+
 // Versão do app, disponível desde o início (antes de qualquer conexão).
 // No app instalado vem do Electron; na versão web vem de web-version.js (gerado ao publicar).
 const IS_WEB = !window.desktop;
@@ -84,7 +136,11 @@ function fmtTime(ts) {
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { console.warn('storage', e); } },
+  set(k, v) {
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { console.warn('storage', e); }
+    // conta / lista de servidores / servidor mudou: backup logo (2s depois, junta várias mudanças)
+    if (/^salinha-(accounts|servers-|server-)/.test(k)) { clearTimeout(store.bt); store.bt = setTimeout(() => backupNow(), 2000); }
+  },
   del(k) { localStorage.removeItem(k); },
 };
 

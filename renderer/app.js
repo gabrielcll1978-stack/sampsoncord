@@ -656,6 +656,7 @@ const actions = {
     if (!acc || !confirm(`Remover a conta "${acc.name}" deste PC?\n\nDica: antes, copie o código da conta (em "Minha conta") se quiser usá-la de novo.`)) return;
     store.set('salinha-accounts', loadAccounts().filter((a) => a.id !== acc.id));
     store.del('salinha-servers-' + acc.id);
+    backupNow(true); // remoção de propósito: o backup também esquece essa conta
     renderLogin();
   },
   'import-acc': () => openImportModal(),
